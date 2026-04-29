@@ -1,0 +1,1016 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>MOJ Discovery</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;600;800&display=swap');
+
+:root {
+  --bg:       #080a0f;
+  --surface:  #0e1117;
+  --surface2: #141820;
+  --border:   #1c2030;
+  --border2:  #252a3a;
+  --accent:   #3b82f6;
+  --cyan:     #22d3ee;
+  --green:    #22c55e;
+  --yellow:   #eab308;
+  --red:      #ef4444;
+  --purple:   #a78bfa;
+  --text:     #dde3f0;
+  --muted:    #4a5568;
+  --mono:     'JetBrains Mono', monospace;
+  --sans:     'Syne', sans-serif;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  gap: 12px;
+}
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 800;
+  font-size: 1rem;
+  letter-spacing: .05em;
+  white-space: nowrap;
+}
+.logo-ring {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  font-size: .65rem;
+  font-family: var(--mono);
+  color: var(--accent);
+  flex-shrink: 0;
+  transition: all .3s;
+}
+.logo-ring.scanning {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  box-shadow: 0 0 14px rgba(34,211,238,.3);
+  animation: spin-ring 2s linear infinite;
+}
+@keyframes spin-ring {
+  0%   { box-shadow: 0 0 14px rgba(34,211,238,.3), inset 0 0 0 1px transparent; }
+  50%  { box-shadow: 0 0 24px rgba(34,211,238,.5), inset 0 0 0 1px rgba(34,211,238,.1); }
+  100% { box-shadow: 0 0 14px rgba(34,211,238,.3), inset 0 0 0 1px transparent; }
+}
+.header-center {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex: 1;
+  justify-content: center;
+}
+.phase-display {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: .72rem;
+}
+.phase-tag {
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--border);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  transition: all .3s;
+}
+.phase-tag.active { background: rgba(59,130,246,.15); color: var(--accent); }
+.phase-tag.done   { background: rgba(34,197,94,.12);  color: var(--green);  }
+
+.progress-pill {
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--muted);
+}
+.progress-pill span { color: var(--cyan); }
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.ws-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: background .3s;
+  flex-shrink: 0;
+}
+.ws-dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.next-label {
+  font-family: var(--mono);
+  font-size: .68rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.next-label span { color: var(--accent); }
+
+/* ── Layout ── */
+.layout {
+  display: grid;
+  grid-template-columns: 260px 1fr 260px;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+@media (max-width: 1100px) {
+  .layout { grid-template-columns: 220px 1fr; }
+  .right-panel { display: none; }
+}
+@media (max-width: 750px) {
+  .layout { grid-template-columns: 1fr; }
+  .left-panel { display: none; }
+}
+
+/* ── Panels ── */
+.left-panel, .right-panel {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.right-panel { border-right: none; border-left: 1px solid var(--border); }
+
+.section-label {
+  font-size: .62rem;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+/* ── Stat cards ── */
+.stat-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.stat { 
+  background: var(--bg); 
+  border: 1px solid var(--border); 
+  border-radius: 7px; 
+  padding: 10px 10px 8px;
+}
+.stat-n { 
+  font-family: var(--mono); 
+  font-size: 1.4rem; 
+  font-weight: 700; 
+  line-height: 1; 
+}
+.stat-n.c-blue   { color: var(--accent);  }
+.stat-n.c-green  { color: var(--green);   }
+.stat-n.c-yellow { color: var(--yellow);  }
+.stat-n.c-red    { color: var(--red);     }
+.stat-n.c-purple { color: var(--purple);  }
+.stat-l { font-size: .6rem; color: var(--muted); margin-top: 3px; text-transform: uppercase; letter-spacing: .06em; }
+
+/* ── Progress bar ── */
+.prog-wrap { 
+  background: var(--border); 
+  border-radius: 3px; 
+  height: 5px; 
+  overflow: hidden; 
+  margin-top: 4px; 
+}
+.prog-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--cyan));
+  border-radius: 3px;
+  transition: width .5s ease;
+  width: 0%;
+}
+
+/* ── Domain list ── */
+.domain-list { 
+  display: flex; 
+  flex-direction: column; 
+  gap: 3px; 
+  max-height: 180px; 
+  overflow-y: auto; 
+}
+.domain-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: .7rem;
+  padding: 4px 7px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.domain-scheme { 
+  font-size: .58rem; 
+  background: rgba(34,197,94,.1); 
+  color: var(--green); 
+  padding: 1px 4px; 
+  border-radius: 3px; 
+}
+
+/* ── Buttons ── */
+.btn {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: .82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-decoration: none;
+}
+.btn:hover { background: var(--border); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 0 18px rgba(59,130,246,.2); }
+.btn.primary:hover { background: #2563eb; }
+.btn.primary:disabled { background: var(--border2); border-color: var(--border2); color: var(--muted); box-shadow: none; cursor: not-allowed; }
+.btn.outline { color: var(--cyan); border-color: rgba(34,211,238,.25); }
+.btn.outline:hover { background: rgba(34,211,238,.05); }
+.btn.sm { padding: 6px 10px; font-size: .75rem; width: auto; }
+
+/* ── Fields ── */
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label { font-size: .65rem; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+.field input, .field select, .field textarea {
+  padding: 7px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: .78rem;
+  outline: none;
+  transition: border-color .2s;
+}
+.field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); }
+.field textarea { resize: vertical; min-height: 80px; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+/* ── Settings form ── */
+.settings-form { display: flex; flex-direction: column; gap: 10px; }
+
+/* ── Center panel ── */
+.center-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── Tabs ── */
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  padding: 0 20px;
+  flex-shrink: 0;
+}
+.tab {
+  padding: 12px 16px;
+  font-size: .78rem;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all .2s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.tab-content { display: none; flex: 1; overflow: hidden; min-height: 0; }
+.tab-content.active { display: flex; flex-direction: column; }
+
+/* ── Results toolbar ── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.search {
+  flex: 1;
+  min-width: 140px;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: .78rem;
+  outline: none;
+}
+.search:focus { border-color: var(--accent); }
+.filter-group { display: flex; gap: 3px; }
+.fbtn {
+  padding: 4px 9px;
+  font-size: .67rem;
+  font-family: var(--mono);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all .15s;
+  white-space: nowrap;
+}
+.fbtn:hover { color: var(--text); }
+.fbtn.active { background: var(--border2); color: var(--text); }
+.fbtn.f-found.active  { border-color: var(--green);  color: var(--green);  background: rgba(34,197,94,.08); }
+.fbtn.f-failed.active { border-color: var(--red);    color: var(--red);    background: rgba(239,68,68,.08); }
+
+/* ── Results table ── */
+.table-wrap { flex: 1; overflow-y: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+thead th {
+  padding: 8px 14px;
+  text-align: left;
+  font-size: .62rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 700;
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0;
+  background: var(--surface2);
+  z-index: 2;
+}
+tbody tr { border-bottom: 1px solid rgba(28,32,48,.7); transition: background .1s; }
+tbody tr:hover { background: rgba(255,255,255,.02); }
+td { padding: 8px 14px; font-family: var(--mono); vertical-align: middle; }
+td.t-slug { font-weight: 600; font-size: .8rem; }
+td.t-url { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td.t-url a { color: var(--accent); text-decoration: none; font-size: .72rem; }
+td.t-url a:hover { text-decoration: underline; }
+td.t-pattern { font-size: .68rem; color: var(--muted); }
+td.t-domain  { font-size: .68rem; color: var(--muted); }
+.pill {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: .62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.pill.found  { background: rgba(34,197,94,.1);  color: var(--green); }
+.pill.failed { background: rgba(239,68,68,.08); color: var(--red);   }
+
+/* ── Log ── */
+.log-wrap {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 16px;
+  font-family: var(--mono);
+  font-size: .75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.log-entry {
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(28,32,48,.5);
+  animation: fadeIn .2s ease;
+}
+@keyframes fadeIn { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:none; } }
+.log-ts  { color: var(--muted); flex-shrink: 0; width: 56px; }
+.log-msg { color: var(--text); word-break: break-word; }
+.log-msg.ok   { color: var(--green); }
+.log-msg.warn { color: var(--yellow); }
+.log-msg.err  { color: var(--red); }
+
+/* ── Patterns editor (right panel) ── */
+.pattern-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.pattern-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pattern-input {
+  flex: 1;
+  padding: 5px 7px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: .72rem;
+  outline: none;
+}
+.pattern-input:focus { border-color: var(--accent); }
+.del-btn {
+  width: 22px; height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: .8rem;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: all .15s;
+}
+.del-btn:hover { color: var(--red); border-color: var(--red); background: rgba(239,68,68,.08); }
+
+/* ── Channels editor ── */
+.ch-editor {
+  font-family: var(--mono);
+  font-size: .72rem;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  resize: vertical;
+  min-height: 200px;
+  max-height: 340px;
+  width: 100%;
+  outline: none;
+  line-height: 1.6;
+}
+.ch-editor:focus { border-color: var(--accent); }
+.ch-count { font-size: .68rem; color: var(--muted); text-align: right; margin-top: 3px; }
+
+/* ── Empty state ── */
+.empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted);
+  padding: 40px;
+  text-align: center;
+}
+.empty-icon { font-size: 2.2rem; }
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-ring" id="logoRing">▶</div>
+    MOJ Discovery
+  </div>
+
+  <div class="header-center">
+    <div class="phase-display">
+      <span class="phase-tag" id="phaseTag">idle</span>
+      <span class="progress-pill" id="progPill"></span>
+    </div>
+    <div style="width:160px;">
+      <div class="prog-wrap"><div class="prog-fill" id="progFill"></div></div>
+    </div>
+  </div>
+
+  <div class="header-right">
+    <div class="next-label">Next: <span id="nextCycle">–</span></div>
+    <div class="ws-dot" id="wsDot"></div>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- ── Left Panel ── -->
+  <aside class="left-panel">
+
+    <!-- Stats -->
+    <div>
+      <div class="section-label">Discovery Stats</div>
+      <div class="stat-row">
+        <div class="stat"><div class="stat-n c-blue"   id="stSlugs">0</div><div class="stat-l">Slugs</div></div>
+        <div class="stat"><div class="stat-n c-green"  id="stFound">0</div><div class="stat-l">Found</div></div>
+        <div class="stat"><div class="stat-n c-red"    id="stFailed">0</div><div class="stat-l">Failed</div></div>
+        <div class="stat"><div class="stat-n c-purple" id="stProbes">0</div><div class="stat-l">Probes</div></div>
+      </div>
+    </div>
+
+    <!-- Active Domains -->
+    <div>
+      <div class="section-label">Active Domains (<span id="domCount">0</span>)</div>
+      <div class="domain-list" id="domList">
+        <div style="font-size:.72rem;color:var(--muted)">Waiting for sweep…</div>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div style="display:flex;flex-direction:column;gap:7px">
+      <button class="btn primary" id="btnRun" onclick="triggerRun()">▶ Run Discovery</button>
+      <a class="btn outline" href="/playlist" target="_blank">↓ Download Playlist</a>
+    </div>
+
+    <!-- Settings -->
+    <div>
+      <div class="section-label">Settings</div>
+      <div class="settings-form">
+        <div class="field">
+          <label>Playlist URL (extra slugs)</label>
+          <input type="url" id="cfgUrl" placeholder="http://…/playlist"/>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Min FL</label><input type="number" id="cfgMin" min="1" max="999"/></div>
+          <div class="field"><label>Max FL</label><input type="number" id="cfgMax" min="1" max="999"/></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Timeout (s)</label><input type="number" id="cfgTimeout" min="5" max="30"/></div>
+          <div class="field"><label>Concurrency</label><input type="number" id="cfgConcur" min="1" max="50"/></div>
+        </div>
+        <div class="field">
+          <label>Scan Interval (s)</label>
+          <input type="number" id="cfgInterval" min="60"/>
+        </div>
+        <div class="field">
+          <label>Auto Cycle</label>
+          <select id="cfgAuto"><option value="true">Enabled</option><option value="false">Disabled</option></select>
+        </div>
+        <button class="btn" onclick="saveSettings()" style="font-size:.78rem">Save Settings</button>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ── Center Panel ── -->
+  <div class="center-panel">
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('results')">Results</div>
+      <div class="tab" onclick="switchTab('channels')">Channels</div>
+      <div class="tab" onclick="switchTab('log')">Scan Log</div>
+    </div>
+
+    <!-- Results Tab -->
+    <div class="tab-content active" id="tab-results">
+      <div class="toolbar">
+        <input class="search" id="searchInput" placeholder="Search slugs…" oninput="renderTable()"/>
+        <div class="filter-group">
+          <button class="fbtn active" data-f="all"    onclick="setFilter('all')">All</button>
+          <button class="fbtn f-found"  data-f="found"  onclick="setFilter('found')">Found</button>
+          <button class="fbtn f-failed" data-f="failed" onclick="setFilter('failed')">Failed</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="resultsTable">
+          <thead>
+            <tr>
+              <th>Slug</th>
+              <th>Status</th>
+              <th>Pattern</th>
+              <th>Domain</th>
+              <th>URL</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+        <div class="empty" id="resultsEmpty">
+          <div class="empty-icon">📡</div>
+          <div>No results yet.</div>
+          <div style="font-size:.72rem">Run a discovery scan to find working streams.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Channels Tab -->
+    <div class="tab-content" id="tab-channels">
+      <div class="toolbar">
+        <span style="font-size:.78rem;color:var(--muted)">One channel name per line. Used as slugs for discovery.</span>
+        <button class="btn outline sm" onclick="saveChannels()">Save</button>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:8px">
+        <textarea class="ch-editor" id="chEditor" oninput="updateChCount()" spellcheck="false"></textarea>
+        <div class="ch-count"><span id="chCount">0</span> channels</div>
+      </div>
+    </div>
+
+    <!-- Log Tab -->
+    <div class="tab-content" id="tab-log">
+      <div class="log-wrap" id="logWrap">
+        <div class="empty"><div class="empty-icon">🔍</div><div>No log entries yet.</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Right Panel ── -->
+  <aside class="right-panel">
+
+    <!-- Path Patterns -->
+    <div>
+      <div class="section-label">Path Patterns</div>
+      <div style="font-size:.68rem;color:var(--muted);margin-bottom:8px;line-height:1.5">
+        Tried per slug in order. Use <code style="color:var(--cyan)">{slug}</code> as placeholder.
+        First working URL wins.
+      </div>
+      <div class="pattern-list" id="patternList"></div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="btn outline sm" onclick="addPattern()">+ Add</button>
+        <button class="btn sm" onclick="savePatterns()" style="flex:1">Save Patterns</button>
+      </div>
+    </div>
+
+    <!-- Last cycle summary -->
+    <div>
+      <div class="section-label">Last Cycle</div>
+      <div style="font-family:var(--mono);font-size:.72rem;display:flex;flex-direction:column;gap:5px">
+        <div style="color:var(--muted)">Completed: <span id="lastCycle" style="color:var(--text)">–</span></div>
+        <div style="color:var(--muted)">Streams found: <span id="lastFound" style="color:var(--green)">–</span></div>
+        <div style="color:var(--muted)">Slugs probed: <span id="lastSlugs" style="color:var(--text)">–</span></div>
+      </div>
+    </div>
+
+    <!-- Slug normalization preview -->
+    <div>
+      <div class="section-label">Slug Preview</div>
+      <div class="field">
+        <label>Test a name</label>
+        <input type="text" id="slugTest" placeholder="ESPN 2" oninput="previewSlug()"/>
+      </div>
+      <div id="slugPreview" style="font-family:var(--mono);font-size:.8rem;color:var(--cyan);margin-top:6px;min-height:20px"></div>
+    </div>
+
+  </aside>
+
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+let appState = {};
+let filterMode = 'all';
+let ws, wsRetry = 0;
+let lastStats = {};
+
+// ── WebSocket ──────────────────────────────────────────────────────────────────
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => {
+    wsRetry = 0;
+    document.getElementById('wsDot').classList.add('on');
+  };
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'state') { appState = msg.data; renderAll(); }
+    else if (msg.type === 'log') { appendLog(msg.entry); }
+  };
+  ws.onclose = () => {
+    document.getElementById('wsDot').classList.remove('on');
+    setTimeout(connect, Math.min(30000, 1000 * 2 ** wsRetry++));
+  };
+  ws.onerror = () => ws.close();
+}
+
+// ── Render All ─────────────────────────────────────────────────────────────────
+function renderAll() {
+  const s = appState;
+  const stats = s.stats || {};
+  const running = s.running;
+  const phase = s.phase || 'idle';
+
+  // Header
+  const ring = document.getElementById('logoRing');
+  ring.textContent = running ? '◌' : '▶';
+  ring.classList.toggle('scanning', running);
+
+  const phaseMap = {
+    idle: 'idle', downloading: 'fetching slugs', domains: 'domain sweep',
+    slugs: 'building slugs', discovering: 'probing streams'
+  };
+  const tag = document.getElementById('phaseTag');
+  tag.textContent = phaseMap[phase] || phase;
+  tag.className = 'phase-tag' + (running ? ' active' : (stats.found > 0 ? ' done' : ''));
+
+  const prog = s.progress || 0;
+  const total = s.total || 0;
+  const pct = total > 0 ? Math.round(prog / total * 100) : 0;
+  document.getElementById('progFill').style.width = pct + '%';
+  document.getElementById('progPill').innerHTML = total > 0
+    ? `<span>${prog}</span>/${total} &nbsp;(${pct}%)`
+    : '';
+
+  document.getElementById('nextCycle').textContent = s.nextCycleIn || '–';
+
+  // Stats
+  document.getElementById('stSlugs').textContent  = stats.total_slugs ?? 0;
+  document.getElementById('stFound').textContent  = stats.found       ?? 0;
+  document.getElementById('stFailed').textContent = stats.failed      ?? 0;
+  document.getElementById('stProbes').textContent = formatNum(s.probes_fired ?? 0);
+
+  // Domains
+  const domains = s.activeDomains || [];
+  const schemes = s.domainSchemes  || {};
+  document.getElementById('domCount').textContent = domains.length;
+  const dl = document.getElementById('domList');
+  if (!domains.length) {
+    dl.innerHTML = '<div style="font-size:.72rem;color:var(--muted)">No active domains yet.</div>';
+  } else {
+    dl.innerHTML = domains.map(d =>
+      `<div class="domain-item"><span>${d}</span><span class="domain-scheme">${schemes[d]??''}</span></div>`
+    ).join('');
+  }
+
+  // Run button
+  const btn = document.getElementById('btnRun');
+  btn.disabled = running;
+  btn.textContent = running ? '⏳ Scanning…' : '▶ Run Discovery';
+
+  // Last cycle summary
+  document.getElementById('lastCycle').textContent = s.lastCycleTime || '–';
+  document.getElementById('lastFound').textContent = stats.found  != null ? stats.found  : '–';
+  document.getElementById('lastSlugs').textContent = stats.total_slugs != null ? stats.total_slugs : '–';
+
+  renderTable();
+}
+
+// ── Results Table ──────────────────────────────────────────────────────────────
+function renderTable() {
+  const results = appState.results || {};
+  const q = (document.getElementById('searchInput').value || '').toLowerCase();
+
+  const entries = Object.entries(results)
+    .filter(([slug, info]) => {
+      const status = info.url ? 'found' : 'failed';
+      if (filterMode !== 'all' && status !== filterMode) return false;
+      if (q && !slug.toLowerCase().includes(q)) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      // found before failed, then alphabetical
+      const sa = a[1].url ? 0 : 1;
+      const sb = b[1].url ? 0 : 1;
+      if (sa !== sb) return sa - sb;
+      return a[0].localeCompare(b[0]);
+    });
+
+  const tbody  = document.getElementById('resultsBody');
+  const empty  = document.getElementById('resultsEmpty');
+
+  if (!entries.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+  empty.style.display = 'none';
+
+  tbody.innerHTML = entries.map(([slug, info]) => {
+    const status  = info.url ? 'found' : 'failed';
+    const urlCell = info.url
+      ? `<a href="${esc(info.url)}" target="_blank" title="${esc(info.url)}">${esc(info.url)}</a>`
+      : '<span style="color:var(--muted)">—</span>';
+    const patCell = info.pattern ? esc(info.pattern) : '—';
+    const domCell = info.domain  ? esc(info.domain)  : '—';
+    return `
+      <tr>
+        <td class="t-slug">${esc(slug)}</td>
+        <td><span class="pill ${status}">${status}</span></td>
+        <td class="t-pattern">${patCell}</td>
+        <td class="t-domain">${domCell}</td>
+        <td class="t-url">${urlCell}</td>
+      </tr>`;
+  }).join('');
+}
+
+function setFilter(f) {
+  filterMode = f;
+  document.querySelectorAll('.fbtn').forEach(b => b.classList.toggle('active', b.dataset.f === f));
+  renderTable();
+}
+
+// ── Log ───────────────────────────────────────────────────────────────────────
+function appendLog(entry) {
+  const wrap = document.getElementById('logWrap');
+  wrap.querySelectorAll('.empty').forEach(e => e.remove());
+  const cls = /✓|found|complete/i.test(entry.msg) ? 'ok'
+            : /warn/i.test(entry.msg) ? 'warn'
+            : /error|fail/i.test(entry.msg) ? 'err'
+            : '';
+  const el = document.createElement('div');
+  el.className = 'log-entry';
+  el.innerHTML = `<span class="log-ts">${esc(entry.ts)}</span><span class="log-msg ${cls}">${esc(entry.msg)}</span>`;
+  wrap.appendChild(el);
+  const all = wrap.querySelectorAll('.log-entry');
+  if (all.length > 600) all[0].remove();
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+function renderLog() {
+  const wrap = document.getElementById('logWrap');
+  const entries = appState.scanLog || [];
+  if (!entries.length) return;
+  wrap.innerHTML = '';
+  entries.forEach(appendLog);
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/config');
+    const cfg = await r.json();
+    document.getElementById('cfgUrl').value      = cfg.playlist_url      ?? '';
+    document.getElementById('cfgMin').value      = cfg.min_fl            ?? 2;
+    document.getElementById('cfgMax').value      = cfg.max_fl            ?? 200;
+    document.getElementById('cfgTimeout').value  = cfg.stream_timeout    ?? 10;
+    document.getElementById('cfgConcur').value   = cfg.stream_concurrency ?? 15;
+    document.getElementById('cfgInterval').value = cfg.scan_interval     ?? 14400;
+    document.getElementById('cfgAuto').value     = cfg.auto_cycle ? 'true' : 'false';
+    renderPatterns(cfg.path_patterns ?? []);
+  } catch(e) { console.error(e); }
+}
+
+async function saveSettings() {
+  const body = {
+    playlist_url:       document.getElementById('cfgUrl').value,
+    min_fl:             parseInt(document.getElementById('cfgMin').value),
+    max_fl:             parseInt(document.getElementById('cfgMax').value),
+    stream_timeout:     parseInt(document.getElementById('cfgTimeout').value),
+    stream_concurrency: parseInt(document.getElementById('cfgConcur').value),
+    scan_interval:      parseInt(document.getElementById('cfgInterval').value),
+    auto_cycle:         document.getElementById('cfgAuto').value === 'true',
+  };
+  await fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+}
+
+// ── Path Patterns ─────────────────────────────────────────────────────────────
+function renderPatterns(patterns) {
+  const list = document.getElementById('patternList');
+  list.innerHTML = '';
+  patterns.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'pattern-row';
+    row.innerHTML = `
+      <input class="pattern-input" value="${esc(p)}" data-i="${i}" placeholder="/{slug}/index.m3u8"/>
+      <button class="del-btn" onclick="removePattern(${i})">×</button>`;
+    list.appendChild(row);
+  });
+}
+
+function addPattern() {
+  const list = document.getElementById('patternList');
+  const i = list.children.length;
+  const row = document.createElement('div');
+  row.className = 'pattern-row';
+  row.innerHTML = `
+    <input class="pattern-input" value="" data-i="${i}" placeholder="/{slug}/index.m3u8"/>
+    <button class="del-btn" onclick="removePattern(${i})">×</button>`;
+  list.appendChild(row);
+}
+
+function removePattern(i) {
+  const inputs = document.querySelectorAll('.pattern-input');
+  const arr = [...inputs].map(el => el.value.trim()).filter(Boolean);
+  arr.splice(i, 1);
+  renderPatterns(arr);
+}
+
+async function savePatterns() {
+  const patterns = [...document.querySelectorAll('.pattern-input')]
+    .map(el => el.value.trim()).filter(Boolean);
+  await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ path_patterns: patterns })
+  });
+}
+
+// ── Channels Editor ───────────────────────────────────────────────────────────
+async function loadChannels() {
+  try {
+    const r = await fetch('/api/channels');
+    const data = await r.json();
+    document.getElementById('chEditor').value = (data.channels || []).join('\n');
+    updateChCount();
+  } catch(e) { console.error(e); }
+}
+
+function updateChCount() {
+  const lines = document.getElementById('chEditor').value
+    .split('\n').map(l => l.trim()).filter(Boolean);
+  document.getElementById('chCount').textContent = lines.length;
+}
+
+async function saveChannels() {
+  const lines = document.getElementById('chEditor').value
+    .split('\n').map(l => l.trim()).filter(Boolean);
+  const r = await fetch('/api/channels', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ channels: lines })
+  });
+  const d = await r.json();
+  // brief visual feedback
+  const btn = document.querySelector('[onclick="saveChannels()"]');
+  const orig = btn.textContent;
+  btn.textContent = `✓ Saved ${d.count}`;
+  setTimeout(() => btn.textContent = orig, 1500);
+}
+
+// ── Slug Preview ──────────────────────────────────────────────────────────────
+function previewSlug() {
+  const raw = document.getElementById('slugTest').value;
+  const slug = normalizeSlug(raw);
+  document.getElementById('slugPreview').textContent = slug ? slug : '';
+}
+
+function normalizeSlug(raw) {
+  let s = raw.toUpperCase().trim();
+  s = s.replace(/&/g, 'AND');
+  s = s.replace(/\+/g, 'PLUS');
+  s = s.replace(/[^A-Z0-9_]/g, '_');
+  s = s.replace(/_+/g, '_');
+  s = s.replace(/^_|_$/g, '');
+  return s;
+}
+
+// ── Actions ───────────────────────────────────────────────────────────────────
+async function triggerRun() {
+  const btn = document.getElementById('btnRun');
+  btn.disabled = true;
+  btn.textContent = '⏳ Starting…';
+  try {
+    const r = await fetch('/api/run', { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json();
+      alert(d.detail || 'Could not start scan.');
+      btn.disabled = false;
+      btn.textContent = '▶ Run Discovery';
+    }
+  } catch(e) {
+    alert('Network error: ' + e);
+    btn.disabled = false;
+    btn.textContent = '▶ Run Discovery';
+  }
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function switchTab(name) {
+  const names = ['results', 'channels', 'log'];
+  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', names[i] === name));
+  document.querySelectorAll('.tab-content').forEach(tc => tc.classList.toggle('active', tc.id === 'tab-' + name));
+  if (name === 'log') renderLog();
+}
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function formatNum(n) {
+  return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadSettings();
+loadChannels();
+connect();
+fetch('/api/state').then(r => r.json()).then(d => { appState = d; renderAll(); }).catch(() => {});
+</script>
+</body>
+</html>

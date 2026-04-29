@@ -1,0 +1,24 @@
+# Runtime data — never commit these
+data/logs/
+data/output.m3u8
+data/results.json
+data/*.log
+
+# Keep the default config and channel list tracked
+# but ignore any local overrides placed in data/
+data/config.json.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Docker
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db

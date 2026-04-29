@@ -1,0 +1,27 @@
+{
+  "min_fl": 2,
+  "max_fl": 200,
+  "healthcheck_enabled": true,
+  "healthcheck_interval": 86400,
+  "healthcheck_batch": 5,
+  "stream_timeout": 10,
+  "domain_timeout": 5,
+  "stream_concurrency": 15,
+  "domain_concurrency": 50,
+  "probe_delay_ms": 200,
+  "slug_source": "both",
+  "playlist_url": "http://192.168.1.240:9005/playlist",
+  "path_patterns": [
+    "/{slug}/index.m3u8",
+    "/{slug}/index.ts",
+    "/{slug}.m3u8",
+    "/{slug}.ts",
+    "/live/{slug}/index.m3u8",
+    "/live/{slug}/index.ts",
+    "/stream/{slug}/index.m3u8",
+    "/stream/{slug}.m3u8",
+    "/{slug}/index.m3u"
+  ],
+  "scan_interval": 14400,
+  "auto_cycle": true
+}

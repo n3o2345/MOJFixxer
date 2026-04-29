@@ -1,0 +1,45 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MOJFixxer — Docker Compose
+#
+#  Pulls the pre-built image from GitHub Container Registry.
+#  For a local build substitute the image line with:
+#    build: .
+#
+#  Dashboard : http://<host-ip>:9001/
+#  Playlist  : http://<host-ip>:9001/playlist
+# ═══════════════════════════════════════════════════════════════════════════════
+
+services:
+  mojfixxer:
+    container_name: mojfixxer
+    image: ghcr.io/${GITHUB_REPOSITORY:-yourusername/mojfixxer}:latest
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      TZ: ${TZ:-America/Chicago}
+
+    ports:
+      - "${HOST_PORT:-9001}:8080"
+
+    volumes:
+      # Persistent data: config, playlist output, logs.
+      # channels.txt and config.json are seeded from defaults on first run.
+      - mojfixxer-data:/app
+
+    restart: unless-stopped
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/state"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  mojfixxer-data:
