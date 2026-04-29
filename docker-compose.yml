@@ -12,7 +12,7 @@
 services:
   mojfixxer:
     container_name: mojfixxer
-    image: ghcr.io/${GITHUB_REPOSITORY:-yourusername/mojfixxer}:latest
+    image: ghcr.io/n3o2345/mojfixxer}:latest
 
     environment:
       PYTHONUNBUFFERED: "1"
