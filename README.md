@@ -40,29 +40,7 @@ The playlist is available at `http://localhost:9001/playlist`.
 |---|---|---|
 | `TZ` | `America/Chicago` | Timezone for log timestamps |
 | `HOST_PORT` | `9001` | Host port mapped to the container |
-| `GITHUB_REPOSITORY` | `yourusername/mojfixxer` | Used to resolve the GHCR image name |
 
----
-
-## Repository Layout
-
-```
-.
-├── app/
-│   ├── server.py          # FastAPI application
-│   ├── channels.txt       # Default fallback slug list (seeded on first run)
-│   └── web/
-│       ├── index.html     # Dashboard UI
-│       └── static/        # JS / CSS
-├── data/
-│   ├── config.json        # Default runtime config (seeded on first run)
-│   └── logs/              # Placeholder (populated at runtime)
-├── Dockerfile
-├── docker-compose.yml
-├── docker-entrypoint.sh   # Seeds /app defaults, then exec's the server
-└── .github/workflows/
-    └── docker-publish.yml # Build + push to GHCR on push to main / tags
-```
 
 ---
 
@@ -72,29 +50,6 @@ The playlist is available at `http://localhost:9001/playlist`.
 docker build -t mojfixxer .
 docker run -p 9001:8080 -v mojfixxer-data:/app mojfixxer
 ```
-
----
-
-## CI / CD
-
-Pushes to `main` automatically build a multi-arch image (`amd64` + `arm64`) and push it to:
-
-```
-ghcr.io/YOUR_USERNAME/mojfixxer:latest
-ghcr.io/YOUR_USERNAME/mojfixxer:main
-```
-
-Version tags (`v1.2.3`) additionally publish:
-
-```
-ghcr.io/YOUR_USERNAME/mojfixxer:1.2.3
-ghcr.io/YOUR_USERNAME/mojfixxer:1.2
-ghcr.io/YOUR_USERNAME/mojfixxer:1
-```
-
-No secrets need to be configured — the workflow uses the built-in `GITHUB_TOKEN`.
-
----
 
 ## TrueNAS / NAS Deployment
 
