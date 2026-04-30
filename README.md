@@ -2,7 +2,6 @@
 
 A self-hosted IPTV stream manager. Crawls `moveonjoy.com` domains to discover and health-check live streams, serving results as an M3U8 playlist through a FastAPI web interface.
 
-[![Build and Push to GHCR](https://github.com/YOUR_USERNAME/mojfixxer/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/YOUR_USERNAME/mojfixxer/actions/workflows/docker-publish.yml)
 
 ---
 
