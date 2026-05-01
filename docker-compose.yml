@@ -12,7 +12,7 @@
 services:
   mojfixxer:
     container_name: mojfixxer
-    image: ghcr.io/${GITHUB_REPOSITORY:-yourusername/mojfixxer}:latest
+    image: ghcr.io/n3o2345/mojfixxer}:latest
 
     environment:
       PYTHONUNBUFFERED: "1"
@@ -22,7 +22,7 @@ services:
       - "${HOST_PORT:-9001}:8080"
 
     volumes:
-      # Persistent data: config, playlist output, logs.
+      # Persistent data: config, playlist output, logs. Edit this to your data path.
       # channels.txt and config.json are seeded from defaults on first run.
       - mojfixxer-data:/app
 
