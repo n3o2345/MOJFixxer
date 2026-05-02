@@ -456,9 +456,15 @@ def _slug_from_url(url: str) -> str | None:
     return None
 
 # ── Domain Reachability ────────────────────────────────────────────────────────
-async def _check_domain(fl: int, sem: asyncio.Semaphore) -> dict | None:
+async def _check_domain(fl: int, sem: asyncio.Semaphore) -> list[dict]:
+    """
+    Check both https and http for a domain.
+    Returns a list of {domain, scheme} — one entry per responsive scheme.
+    Both are kept because a domain may serve streams on one scheme only.
+    """
     domain  = f"fl{fl}.moveonjoy.com"
     timeout = int(config.get("domain_timeout", 5))
+    found   = []
     async with sem:
         for scheme in ("https", "http"):
             rc, code = await _run(
@@ -473,8 +479,8 @@ async def _check_domain(fl: int, sem: asyncio.Semaphore) -> dict | None:
                 timeout=timeout + 3,
             )
             if code.strip() in {"200", "301", "302", "403", "404"}:
-                return {"domain": domain, "scheme": scheme}
-    return None
+                found.append({"domain": domain, "scheme": scheme})
+    return found
 
 # ── Stage 1: Directory Listing ─────────────────────────────────────────────────
 async def _discover_directory(base_url: str) -> list[dict]:
@@ -736,10 +742,19 @@ async def _phase_domains() -> list[dict]:
     mn, mx = int(config["min_fl"]), int(config["max_fl"])
     slog(f"━━━ Domain sweep fl{mn}–fl{mx} ({mx - mn + 1} hosts) ━━━")
     sem = asyncio.Semaphore(int(config.get("domain_concurrency", 40)))
-    raw = await asyncio.gather(*[_check_domain(fl, sem) for fl in range(mn, mx + 1)])
-    active = sorted([r for r in raw if r], key=lambda x: x["domain"])
-    state["domainSchemes"] = {r["domain"]: r["scheme"] for r in active}
-    state["activeDomains"] = [r["domain"] for r in active]
+    raw_lists = await asyncio.gather(*[_check_domain(fl, sem) for fl in range(mn, mx + 1)])
+    # Flatten: each call now returns a list (0–2 entries, one per live scheme)
+    active = sorted(
+        [entry for sublist in raw_lists for entry in sublist],
+        key=lambda x: (x["domain"], x["scheme"])
+    )
+    # domainSchemes: domain → primary scheme (https preferred)
+    state["domainSchemes"] = {
+        r["domain"]: r["scheme"]
+        for r in reversed(active)   # http first so https overwrites
+    }
+    # activeDomains: unique domain names for display
+    state["activeDomains"] = sorted({r["domain"] for r in active})
     slog(f"Found {len(active)} active domain(s): {', '.join(r['domain'] for r in active)}")
     _broadcast({"type": "state", "data": state})
     if not active:
