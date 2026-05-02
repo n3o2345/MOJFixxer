@@ -80,13 +80,8 @@ DEFAULT_CONFIG: dict = {
     "playlist_url":       "",
     "path_patterns": [
         "/{slug}/index.m3u8",
-        "/{slug}/index.ts",
+        "/{slug}/index.m3u",
         "/{slug}.m3u8",
-        "/{slug}.ts",
-        "/live/{slug}/index.m3u8",
-        "/live/{slug}/index.ts",
-        "/stream/{slug}/index.m3u8",
-        "/stream/{slug}.m3u8",
     ],
 }
 
@@ -279,6 +274,66 @@ def normalize_slug(raw: str) -> str:
     s = re.sub(r"[^A-Z0-9]+", "_", s)
     s = re.sub(r"_+", "_", s)
     return s.strip("_")
+
+def _expand_slugs(slugs: list[str]) -> list[str]:
+    """
+    Expand a base slug list into variants that cover numbered/suffixed channels.
+
+    "ESPN"  →  ESPN, ESPN2, ESPN_2, ESPN3, ESPN_3, … ESPN9, ESPN_9,
+               ESPNU, ESPN_U, ESPNNEWS, ESPN_NEWS, ESPNCLASSIC, ESPN_CLASSIC
+    "STARZ" →  STARZ, STARZ2 … STARZ9, STARZEAST, STARZ_EAST,
+               STARZMOVIES, STARZ_MOVIES, STARZCOMEDY, STARZ_COMEDY,
+               STARZEDGE, STARZ_EDGE, STARZKIDS, STARZ_KIDS
+    "HBO"   →  HBO, HBO2 … HBO9, HBOEAST, HBO_EAST, HBOWEST, HBO_WEST,
+               HBOFAMILY, HBO_FAMILY, HBOSIGNATURE, HBO_SIGNATURE,
+               HBOZONE, HBO_ZONE, HBOLATINO, HBO_LATINO
+
+    Numbers 2-9 and a curated set of common suffixes are tried for every slug.
+    Existing slugs that already have a numeric/suffix tail are kept as-is and
+    are NOT expanded further (avoids STARZ2 → STARZ22 etc.).
+    """
+    COMMON_SUFFIXES = [
+        # Geographic / schedule
+        "EAST", "WEST", "HD",
+        # Genre / brand
+        "MOVIES", "COMEDY", "DRAMA", "ACTION", "KIDS", "FAMILY",
+        "CLASSIC", "SIGNATURE", "EDGE", "ZONE", "LATINO", "NEWS",
+        # Letter suffixes (ESPN U, etc.)
+        "U",
+    ]
+
+    # Patterns that indicate a slug is already a variant — don't expand these
+    import re as _re
+    _already_variant = _re.compile(
+        r'(?:' +
+        '|'.join(_re.escape(s) for s in COMMON_SUFFIXES) +
+        r'|\d)$'
+    )
+
+    seen:    set[str]  = set()
+    result:  list[str] = []
+
+    def _add(s: str) -> None:
+        if s and s not in seen:
+            seen.add(s)
+            result.append(s)
+
+    for slug in slugs:
+        _add(slug)
+        # Don't fan out from slugs that are already variants
+        if _already_variant.search(slug):
+            continue
+        # Numeric variants 2-9
+        for n in range(2, 10):
+            _add(f"{slug}{n}")
+            _add(f"{slug}_{n}")
+        # Word suffix variants
+        for suffix in COMMON_SUFFIXES:
+            _add(f"{slug}{suffix}")
+            _add(f"{slug}_{suffix}")
+
+    return result
+
 
 # ── Parsers ────────────────────────────────────────────────────────────────────
 def _is_m3u(text: str) -> bool:
@@ -532,14 +587,16 @@ async def _build_fallback_slugs(
             else:
                 slog(f"  Remote playlist fetch failed (exit {rc})", "warning")
 
-    return sorted(set(slugs))
+    expanded = _expand_slugs(slugs)
+    slog(f"  Slug expansion: {len(slugs)} base → {len(expanded)} total")
+    return expanded
 
 async def _brute_force_domain(
     base_url: str,
     slugs: list[str],
     sem: asyncio.Semaphore,
 ) -> list[dict]:
-    """Try each slug × pattern sequentially, return found streams."""
+    """Try each (expanded) slug × pattern, return found streams."""
     patterns = config.get("path_patterns", DEFAULT_CONFIG["path_patterns"])
     found    = []
 
@@ -562,29 +619,112 @@ async def _brute_force_domain(
     return found
 
 # ── Wildcard M3U / Xtream Scan ───────────────────────────────────────────────────
+def _extract_m3u8_urls(body: str, base_url: str) -> list[str]:
+    """
+    Scrape every .m3u8 / .m3u URL out of any response body — HTML, plain text,
+    or M3U.  Both absolute (http://…) and relative (/path/…) forms are returned
+    as absolute URLs.
+    """
+    found = []
+    seen  = set()
+
+    def _abs(u: str) -> str:
+        u = u.strip().rstrip('"\'>,; \t\n')
+        if u.startswith("http"):
+            return u
+        if u.startswith("/"):
+            # Reconstruct from base_url scheme+host
+            import urllib.parse as _up
+            p = _up.urlparse(base_url)
+            return f"{p.scheme}://{p.netloc}{u}"
+        return ""
+
+    # Absolute URLs anywhere in body
+    for m in re.finditer(r'https?://[^\s"\'<>]+\.m3u8?(?:[?#][^\s"\'<>]*)?', body):
+        u = _abs(m.group(0))
+        if u and u not in seen:
+            seen.add(u); found.append(u)
+
+    # Relative paths: href="/…" src="/…"
+    for m in re.finditer(r'(?:href|src)=["\']?(/[^\s"\'<>]*\.m3u8?(?:[?#][^\s"\'<>]*)?)', body):
+        u = _abs(m.group(1))
+        if u and u not in seen:
+            seen.add(u); found.append(u)
+
+    return found
+
+
 async def _discover_playlist(base_url: str) -> list[dict]:
     """
-    Try each wildcard endpoint in turn.
-    Returns all streams from the first endpoint that yields valid M3U or Xtream JSON.
-    No slug list needed — one hit captures every channel variant automatically.
+    Exhaustive .m3u8 harvest for one base URL:
+
+    Pass 1 — fetch every path in _PLAYLIST_PATHS concurrently.
+             Parse M3U streams AND scrape all .m3u8 URLs found in the body.
+
+    Pass 2 — fetch every scraped .m3u8 URL not yet visited.
+             Parse streams from each one.
+
+    All results are merged; every stream found anywhere is returned.
+    Nothing is discarded on first hit — we keep going through all paths.
     """
+    all_streams: list[dict] = []
+    seen_slugs:  set[str]   = set()
+    visited_urls: set[str]  = set()
+    queued_m3u8s: list[str] = []   # secondary .m3u8 URLs to fetch in pass 2
+
+    def _merge(new_streams: list[dict]) -> None:
+        for s in new_streams:
+            if s["slug"] not in seen_slugs:
+                seen_slugs.add(s["slug"])
+                all_streams.append(s)
+
+    # ── Pass 1: all known wildcard paths ──────────────────────────────────────
     for path in _PLAYLIST_PATHS:
-        url          = base_url.rstrip("/") + path
+        url = base_url.rstrip("/") + path
+        if url in visited_urls:
+            continue
+        visited_urls.add(url)
+
+        status, body = await _fetch(url, timeout=10)
+        if status != 200 or not body or len(body) < 20:
+            continue
+
+        # Parse M3U streams
+        if _is_m3u(body):
+            _merge(parse_m3u_content(body, base_url))
+
+        # Parse Xtream JSON
+        if body.lstrip().startswith("[") or body.lstrip().startswith("{"):
+            _merge(parse_xtream_json(body, base_url))
+
+        # Scrape any .m3u8 URLs embedded in the response (HTML index, etc.)
+        for u in _extract_m3u8_urls(body, base_url):
+            if u not in visited_urls:
+                queued_m3u8s.append(u)
+
+    # ── Pass 2: fetch every scraped .m3u8 URL ────────────────────────────────
+    for url in queued_m3u8s:
+        if url in visited_urls:
+            continue
+        visited_urls.add(url)
+
         status, body = await _fetch(url, timeout=10)
         if status != 200 or not body or len(body) < 20:
             continue
 
         if _is_m3u(body):
-            results = parse_m3u_content(body, base_url)
-            if results:
-                return results
+            _merge(parse_m3u_content(body, base_url))
 
-        if body.lstrip().startswith("[") or body.lstrip().startswith("{"):
-            results = parse_xtream_json(body, base_url)
-            if results:
-                return results
+        # Scrape one level deeper — catches master manifests that reference
+        # per-channel sub-playlists
+        for u in _extract_m3u8_urls(body, base_url):
+            if u not in visited_urls:
+                visited_urls.add(u)
+                s2, b2 = await _fetch(u, timeout=10)
+                if s2 == 200 and b2 and len(b2) >= 20 and _is_m3u(b2):
+                    _merge(parse_m3u_content(b2, base_url))
 
-    return []
+    return all_streams
 
 # ── Per-Domain Discovery ───────────────────────────────────────────────────────
 async def _discover_domain(
