@@ -1,30 +1,28 @@
 """
 MOJ Discovery — server.py
 
-Stream discovery pipeline (per active domain, in order):
+Stream discovery pipeline (per active domain):
 
-  Stage 1 — DIRECTORY LISTING
-    GET /  →  if Nginx/Apache autoindex HTML returned, parse <a href="SLUG/"> links.
-    Gives exact channel slugs with zero wasted probes. One request per domain.
+  Pass A — HTTPS then HTTP
+    Both schemes are always attempted in order for every stage below,
+    so HTTPS streams are never silently skipped when a domain also
+    responds on HTTP.
 
-  Stage 2 — MASTER PLAYLIST
-    Try common playlist endpoints: /playlist.m3u8, /playlist.m3u, /all.m3u8,
-    /channels.m3u8, /index.m3u8, /index.m3u
-    Parse #EXTINF + URL pairs from any M3U/M3U8 response.
-    URLs are used directly — no slug guessing required.
+  1 — DIRECTORY LISTING
+    GET /  →  parse Nginx/Apache autoindex HTML for <a href="SLUG/"> links.
+    Gives exact channel slugs with zero wasted probes.
 
-  Stage 3 — HLS MASTER MANIFEST
-    Servers that expose a top-level #EXT-X-STREAM-INF manifest at /
-    list sub-stream paths directly. Parse and collect.
+  2 — WILDCARD PLAYLIST / XTREAM SCAN
+    Try a broad list of well-known M3U endpoints (all.m3u8, playlist.m3u8,
+    get.php, player_api.php, etc.).  Every #EXTINF + URL pair is collected
+    regardless of channel name — no slug list required.  A single hit
+    captures every variant automatically (e.g. one /all.m3u8 response
+    contains "Starz", "Starz Movies", "Starz East", "Starz Comedy", …).
 
-  Stage 4 — XTREAM CODES API (anonymous)
-    Try /get.php (no credentials) → may return a full M3U playlist.
-    Try /player_api.php?action=get_live_streams → may return JSON stream list.
-
-  Stage 5 — SLUG BRUTE-FORCE (fallback only)
-    Used only when stages 1-4 yield nothing from a domain.
-    Pulls slugs from channels.txt and/or remote playlist URL.
-    Tries each path pattern sequentially per slug — first hit wins.
+  3 — SLUG BRUTE-FORCE (fallback only)
+    Used only when stages 1–2 yield nothing.
+    Pulls slugs from channels.txt and/or remote playlist URL,
+    tries each path pattern until first hit wins.
 
 All discovered stream URLs are verified with ffprobe before inclusion.
 ffprobe validates actual decodability (HLS, MPEG-TS, RTMP, plain HTTP)
@@ -104,18 +102,40 @@ DEFAULT_CONFIG: dict = {
     ],
 }
 
-# Playlist endpoints tried during master-playlist discovery (Stage 2)
+# Playlist endpoints tried during master-playlist discovery (Stage 2).
+# Ordered broadest-first: anything returning a full M3U is preferred.
+# No slug required — we grab whatever the server exposes and parse every
+# #EXTINF / URL pair from it, catching all variants automatically.
 _PLAYLIST_PATHS = [
-    "/playlist.m3u8",
-    "/playlist.m3u",
+    # Broad "give me everything" endpoints
+    "/get.php",                                   # Xtream Codes no-auth
     "/all.m3u8",
     "/all.m3u",
+    "/playlist.m3u8",
+    "/playlist.m3u",
     "/channels.m3u8",
     "/channels.m3u",
+    "/live.m3u8",
+    "/live.m3u",
     "/index.m3u8",
     "/index.m3u",
+    # Sub-path variants
     "/live/index.m3u8",
-    "/get.php",         # Xtream no-auth (Stage 4 folded in)
+    "/live/playlist.m3u8",
+    "/live/all.m3u8",
+    "/stream/index.m3u8",
+    "/stream/playlist.m3u8",
+    "/streams.m3u8",
+    "/streams.m3u",
+    "/feed.m3u8",
+    "/output.m3u8",
+    "/list.m3u8",
+    "/list.m3u",
+    # Xtream / panel API variants
+    "/player_api.php?action=get_live_streams",
+    "/get.php?type=m3u_plus",
+    "/get.php?output=m3u8",
+    "/get.php?output=ts",
 ]
 
 def load_config() -> dict:
@@ -654,26 +674,30 @@ async def _discover_domain(
     Run the full discovery pipeline for one domain.
     Returns (stream_list, method_used).
     Streams have keys: slug, name, url (may be None for dir entries), method.
+    Always tries https first regardless of which scheme was detected active,
+    then falls back to http — ensures HTTPS streams are never missed.
     """
+    # Always try https first, then http — covers cases where only one scheme
+    # serves streams even if the other answered the reachability probe.
+    for s in ("https", "http"):
+        base_url = f"{s}://{domain}"
+
+        # Stage 1 — Directory listing
+        streams = await _discover_directory(base_url)
+        if streams:
+            slog(f"  [{domain}] Directory listing ({s}) → {len(streams)} entr(ies)")
+            return streams, "directory"
+
+        # Stage 2/4 — Master playlist / Xtream / wildcard scan
+        streams = await _discover_playlist(base_url)
+        if streams:
+            slog(f"  [{domain}] Playlist ({s}) → {len(streams)} stream(s)")
+            return streams, "playlist"
+
+    # Stage 5 — Brute-force fallback (uses preferred scheme)
     base_url = f"{scheme}://{domain}"
-
-    # Stage 1 — Directory listing
-    slog(f"  [{domain}] Stage 1: directory listing …")
-    streams = await _discover_directory(base_url)
-    if streams:
-        slog(f"  [{domain}] Directory listing → {len(streams)} entr(ies)")
-        return streams, "directory"
-
-    # Stage 2/4 — Master playlist / Xtream
-    slog(f"  [{domain}] Stage 2: master playlist / Xtream …")
-    streams = await _discover_playlist(base_url)
-    if streams:
-        slog(f"  [{domain}] Playlist → {len(streams)} stream(s)")
-        return streams, "playlist"
-
-    # Stage 5 — Brute-force fallback
     if fallback_slugs:
-        slog(f"  [{domain}] Stage 5: brute-force {len(fallback_slugs)} slug(s) …")
+        slog(f"  [{domain}] Brute-force {len(fallback_slugs)} slug(s) …")
         streams = await _brute_force_domain(base_url, fallback_slugs, sem)
         if streams:
             slog(f"  [{domain}] Brute-force → {len(streams)} hit(s)")
