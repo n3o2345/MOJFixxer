@@ -618,114 +618,67 @@ async def _brute_force_domain(
     found   = [r for r in results if r]
     return found
 
-# ── Wildcard M3U / Xtream Scan ───────────────────────────────────────────────────
-def _extract_m3u8_urls(body: str, base_url: str) -> list[str]:
-    """
-    Scrape every .m3u8 / .m3u URL out of any response body — HTML, plain text,
-    or M3U.  Both absolute (http://…) and relative (/path/…) forms are returned
-    as absolute URLs.
-    """
-    found = []
-    seen  = set()
+# ── index.m3u8 Scraper ───────────────────────────────────────────────────────────
+# Exact pattern used by these servers: http://{domain}/{SLUG}/index.m3u8
+# Strategy: fetch the root (or fallback paths), regex out every /SLUG/index.m3u8
+# found anywhere in the response, return them all. One request per domain.
 
-    def _abs(u: str) -> str:
-        u = u.strip().rstrip('"\'>,; \t\n')
-        if u.startswith("http"):
-            return u
-        if u.startswith("/"):
-            # Reconstruct from base_url scheme+host
-            import urllib.parse as _up
-            p = _up.urlparse(base_url)
-            return f"{p.scheme}://{p.netloc}{u}"
-        return ""
-
-    # Absolute URLs anywhere in body
-    for m in re.finditer(r'https?://[^\s"\'<>]+\.m3u8?(?:[?#][^\s"\'<>]*)?', body):
-        u = _abs(m.group(0))
-        if u and u not in seen:
-            seen.add(u); found.append(u)
-
-    # Relative paths: href="/…" src="/…"
-    for m in re.finditer(r'(?:href|src)=["\']?(/[^\s"\'<>]*\.m3u8?(?:[?#][^\s"\'<>]*)?)', body):
-        u = _abs(m.group(1))
-        if u and u not in seen:
-            seen.add(u); found.append(u)
-
-    return found
+# Match any /{path}/index.m3u8 — captures the full relative path as group 1
+_INDEX_M3U8_RE = re.compile(r'(/[^\s"\'<>]+/index\.m3u8)', re.IGNORECASE)
 
 
 async def _discover_playlist(base_url: str) -> list[dict]:
     """
-    Exhaustive .m3u8 harvest for one base URL:
+    Fetch the server root (and fallback paths), scrape every */index.m3u8
+    URL found anywhere in the response body, and return a stream entry for each.
 
-    Pass 1 — fetch every path in _PLAYLIST_PATHS concurrently.
-             Parse M3U streams AND scrape all .m3u8 URLs found in the body.
-
-    Pass 2 — fetch every scraped .m3u8 URL not yet visited.
-             Parse streams from each one.
-
-    All results are merged; every stream found anywhere is returned.
-    Nothing is discarded on first hit — we keep going through all paths.
+    Pattern: http://{domain}/*/index.m3u8
+    No slug concept — the full URL is all that matters.
     """
-    all_streams: list[dict] = []
-    seen_slugs:  set[str]   = set()
-    visited_urls: set[str]  = set()
-    queued_m3u8s: list[str] = []   # secondary .m3u8 URLs to fetch in pass 2
+    found:   list[dict] = []
+    seen:    set[str]   = set()   # dedup by full URL
+    visited: set[str]   = set()
 
-    def _merge(new_streams: list[dict]) -> None:
-        for s in new_streams:
-            if s["slug"] not in seen_slugs:
-                seen_slugs.add(s["slug"])
-                all_streams.append(s)
+    def _scrape(body: str) -> None:
+        # Absolute URLs already in body
+        for m in re.finditer(r'https?://[^\s"\'<>]+/index\.m3u8', body):
+            url = m.group(0).strip()
+            if url not in seen:
+                seen.add(url)
+                name = url.rstrip("/").rsplit("/", 2)[-2].replace("_", " ").replace("-", " ").title()
+                found.append({"url": url, "name": name, "method": "index_m3u8"})
+        # Relative paths → make absolute
+        for m in _INDEX_M3U8_RE.finditer(body):
+            rel = m.group(1).strip()
+            url = base_url.rstrip("/") + rel
+            if url not in seen:
+                seen.add(url)
+                name = rel.rstrip("/").rsplit("/", 2)[-2].replace("_", " ").replace("-", " ").title()
+                found.append({"url": url, "name": name, "method": "index_m3u8"})
 
-    # ── Pass 1: all known wildcard paths ──────────────────────────────────────
-    for path in _PLAYLIST_PATHS:
+    for path in ["/"] + _PLAYLIST_PATHS:
         url = base_url.rstrip("/") + path
-        if url in visited_urls:
+        if url in visited:
             continue
-        visited_urls.add(url)
+        visited.add(url)
 
         status, body = await _fetch(url, timeout=10)
-        if status != 200 or not body or len(body) < 20:
+        if status != 200 or not body or len(body) < 10:
             continue
 
-        # Parse M3U streams
+        _scrape(body)
+
+        # Also parse if body is a proper M3U
         if _is_m3u(body):
-            _merge(parse_m3u_content(body, base_url))
+            for s in parse_m3u_content(body, base_url):
+                if s["url"] not in seen:
+                    seen.add(s["url"])
+                    found.append({"url": s["url"], "name": s["name"], "method": "m3u"})
 
-        # Parse Xtream JSON
-        if body.lstrip().startswith("[") or body.lstrip().startswith("{"):
-            _merge(parse_xtream_json(body, base_url))
+        if found:
+            break
 
-        # Scrape any .m3u8 URLs embedded in the response (HTML index, etc.)
-        for u in _extract_m3u8_urls(body, base_url):
-            if u not in visited_urls:
-                queued_m3u8s.append(u)
-
-    # ── Pass 2: fetch every scraped .m3u8 URL ────────────────────────────────
-    for url in queued_m3u8s:
-        if url in visited_urls:
-            continue
-        visited_urls.add(url)
-
-        status, body = await _fetch(url, timeout=10)
-        if status != 200 or not body or len(body) < 20:
-            continue
-
-        if _is_m3u(body):
-            _merge(parse_m3u_content(body, base_url))
-
-        # Scrape one level deeper — catches master manifests that reference
-        # per-channel sub-playlists
-        for u in _extract_m3u8_urls(body, base_url):
-            if u not in visited_urls:
-                visited_urls.add(u)
-                s2, b2 = await _fetch(u, timeout=10)
-                if s2 == 200 and b2 and len(b2) >= 20 and _is_m3u(b2):
-                    _merge(parse_m3u_content(b2, base_url))
-
-    return all_streams
-
+    return found
 # ── Per-Domain Discovery ───────────────────────────────────────────────────────
 async def _discover_domain(
     domain: str,
@@ -804,8 +757,8 @@ async def _phase_domains() -> list[dict]:
 async def _phase_discover(domains: list[dict]) -> None:
     state["phase"] = "discovering"
     sem        = asyncio.Semaphore(int(config.get("stream_concurrency", 10)))
-    seen_slugs: set[str] = set()   # global dedup across domains
-    dead_slugs: list[str] = []     # playlist slugs whose URLs are broken
+    seen_urls: set[str] = set()   # global dedup across domains
+    dead_urls: list[dict] = []    # playlist entries whose URLs are broken/dead
 
     # ── Step A: health-check the imported MOJ playlist against known-good domains ──
     if config.get("slug_source", "both") in ("playlist", "both"):
@@ -818,18 +771,17 @@ async def _phase_discover(domains: list[dict]) -> None:
             _broadcast({"type": "state", "data": state})
 
             async def _check_playlist_entry(ch: dict) -> None:
-                slug = ch["slug"]
                 url  = ch.get("url")
-                name = ch.get("name") or slug.replace("_", " ").title()
+                name = ch.get("name") or (url.rsplit("/", 2)[-2].replace("_", " ").title() if url else "Unknown")
                 if not url:
-                    dead_slugs.append(slug)
+                    dead_urls.append(ch)
                     state["progress"] += 1
                     return
                 alive = await _verify_stream(url, sem)
                 if alive:
-                    if slug not in seen_slugs:
-                        seen_slugs.add(slug)
-                        state["results"][slug] = {
+                    if url not in seen_urls:
+                        seen_urls.add(url)
+                        state["results"][url] = {
                             "url":    url,
                             "name":   name,
                             "domain": _domain_from_url(url),
@@ -838,19 +790,19 @@ async def _phase_discover(domains: list[dict]) -> None:
                         state["stats"]["streams_verified"] += 1
                         state["stats"]["streams_found"]    += 1
                 else:
-                    dead_slugs.append(slug)
+                    dead_urls.append(ch)
                 state["progress"] += 1
 
             await asyncio.gather(*[_check_playlist_entry(ch) for ch in playlist_channels])
             slog(
-                f"  Playlist: {len(seen_slugs)} alive (kept), "
-                f"{len(dead_slugs)} dead → queued for re-scan"
+                f"  Playlist: {len(seen_urls)} alive (kept), "
+                f"{len(dead_urls)} dead → queued for re-scan"
             )
             _broadcast({"type": "state", "data": state})
 
-    # ── Step B: build fallback slug list (dead playlist slugs + channels.txt) ──
+    # ── Step B: build fallback slug list (channels.txt only — discovery handles the rest) ──
     slog("━━━ Preparing fallback slug list ━━━")
-    fallback_slugs = await _build_fallback_slugs(extra_slugs=dead_slugs)
+    fallback_slugs = await _build_fallback_slugs(extra_slugs=None)
     slog(f"  Fallback: {len(fallback_slugs)} slug(s) ready")
 
     for domain_info in domains:
@@ -869,10 +821,10 @@ async def _phase_discover(domains: list[dict]) -> None:
         state["stats"]["discovery_method"][domain] = method
 
         # Deduplicate: skip slugs already resolved by a previous domain
-        new_streams = [s for s in streams if s["slug"] not in seen_slugs]
+        new_streams = [s for s in streams if s["url"] not in seen_urls]
         skipped     = len(streams) - len(new_streams)
         if skipped:
-            slog(f"  [{domain}] Skipping {skipped} slug(s) already found on earlier domain.")
+            slog(f"  [{domain}] Skipping {skipped} stream(s) already found on earlier domain.")
 
         if not new_streams:
             continue
@@ -882,13 +834,13 @@ async def _phase_discover(domains: list[dict]) -> None:
         verified = await _verify_all(new_streams, sem)
 
         for entry in verified:
-            slug = entry["slug"]
-            if slug in seen_slugs:
+            url = entry["url"]
+            if url in seen_urls:
                 continue
-            seen_slugs.add(slug)
-            state["results"][slug] = {
-                "url":    entry["url"],
-                "name":   entry.get("name", slug.replace("_", " ").title()),
+            seen_urls.add(url)
+            state["results"][url] = {
+                "url":    url,
+                "name":   entry.get("name", url.rsplit("/", 2)[-2].replace("_", " ").title()),
                 "domain": domain,
                 "method": method,
             }
@@ -896,13 +848,13 @@ async def _phase_discover(domains: list[dict]) -> None:
             state["progress"]                  += 1
 
         # Mark failed (discovered but not verified)
-        failed_entries = [s for s in new_streams if s["slug"] not in seen_slugs]
+        failed_entries = [s for s in new_streams if s["url"] not in seen_urls]
         for entry in failed_entries:
-            slug = entry["slug"]
-            seen_slugs.add(slug)
-            state["results"][slug] = {
+            url = entry["url"]
+            seen_urls.add(url)
+            state["results"][url] = {
                 "url":    None,
-                "name":   entry.get("name", slug.replace("_", " ").title()),
+                "name":   entry.get("name", url.rsplit("/", 2)[-2].replace("_", " ").title()),
                 "domain": domain,
                 "method": method,
             }
