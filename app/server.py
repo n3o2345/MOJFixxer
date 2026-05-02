@@ -561,6 +561,31 @@ async def _brute_force_domain(
     found   = [r for r in results if r]
     return found
 
+# ── Wildcard M3U / Xtream Scan ───────────────────────────────────────────────────
+async def _discover_playlist(base_url: str) -> list[dict]:
+    """
+    Try each wildcard endpoint in turn.
+    Returns all streams from the first endpoint that yields valid M3U or Xtream JSON.
+    No slug list needed — one hit captures every channel variant automatically.
+    """
+    for path in _PLAYLIST_PATHS:
+        url          = base_url.rstrip("/") + path
+        status, body = await _fetch(url, timeout=10)
+        if status != 200 or not body or len(body) < 20:
+            continue
+
+        if _is_m3u(body):
+            results = parse_m3u_content(body, base_url)
+            if results:
+                return results
+
+        if body.lstrip().startswith("[") or body.lstrip().startswith("{"):
+            results = parse_xtream_json(body, base_url)
+            if results:
+                return results
+
+    return []
+
 # ── Per-Domain Discovery ───────────────────────────────────────────────────────
 async def _discover_domain(
     domain: str,
@@ -593,21 +618,6 @@ async def _discover_domain(
         return streams, "brute"
 
     return [], "none"
-
-    dir_url  = entry["dir_url"]
-    patterns = [
-        "/index.m3u8",
-        "/index.ts",
-        "/index.m3u",
-        "/stream.m3u8",
-        "/stream.ts",
-        "/live.m3u8",
-    ]
-    for pat in patterns:
-        url = dir_url.rstrip("/") + pat
-        if await _verify_stream(url, sem):
-            return {**entry, "url": url}
-    return None
 
 # ── Verify Discovered Streams ──────────────────────────────────────────────────
 async def _verify_all(
