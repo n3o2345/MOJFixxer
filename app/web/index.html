@@ -26,12 +26,11 @@
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 
-html { height: 100%; }
 body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
-  height: 100vh;
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -730,7 +729,7 @@ function renderAll() {
 
   const prog = s.progress || 0;
   const total = s.total || 0;
-  const pct = total > 0 ? Math.round(prog / total * 100) : 0;
+  const pct = total > 0 ? Math.min(100, Math.round(prog / total * 100)) : 0;
   document.getElementById('progFill').style.width = pct + '%';
   document.getElementById('progPill').innerHTML = total > 0
     ? `<span>${prog}</span>/${total} &nbsp;(${pct}%)`

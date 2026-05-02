@@ -773,6 +773,9 @@ async def _phase_discover(domains: list[dict]) -> None:
         playlist_channels = await _load_playlist_channels()
         if playlist_channels:
             active_domains = {d["domain"] for d in domains}
+            # Seed total so progress bar is meaningful during import
+            state["total"] += len(playlist_channels)
+            _broadcast({"type": "state", "data": state})
 
             async def _check_playlist_entry(ch: dict) -> None:
                 slug = ch["slug"]
@@ -780,6 +783,7 @@ async def _phase_discover(domains: list[dict]) -> None:
                 name = ch.get("name") or slug.replace("_", " ").title()
                 if not url:
                     dead_slugs.append(slug)
+                    state["progress"] += 1
                     return
                 alive = await _verify_stream(url, sem)
                 if alive:
@@ -793,9 +797,9 @@ async def _phase_discover(domains: list[dict]) -> None:
                         }
                         state["stats"]["streams_verified"] += 1
                         state["stats"]["streams_found"]    += 1
-                        state["progress"]                  += 1
                 else:
                     dead_slugs.append(slug)
+                state["progress"] += 1
 
             await asyncio.gather(*[_check_playlist_entry(ch) for ch in playlist_channels])
             slog(
