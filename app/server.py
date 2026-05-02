@@ -1,684 +1,1026 @@
+"""
+MOJ Discovery — server.py
+
+Stream discovery pipeline (per active domain, in order):
+
+  Stage 1 — DIRECTORY LISTING
+    GET /  →  if Nginx/Apache autoindex HTML returned, parse <a href="SLUG/"> links.
+    Gives exact channel slugs with zero wasted probes. One request per domain.
+
+  Stage 2 — MASTER PLAYLIST
+    Try common playlist endpoints: /playlist.m3u8, /playlist.m3u, /all.m3u8,
+    /channels.m3u8, /index.m3u8, /index.m3u
+    Parse #EXTINF + URL pairs from any M3U/M3U8 response.
+    URLs are used directly — no slug guessing required.
+
+  Stage 3 — HLS MASTER MANIFEST
+    Servers that expose a top-level #EXT-X-STREAM-INF manifest at /
+    list sub-stream paths directly. Parse and collect.
+
+  Stage 4 — XTREAM CODES API (anonymous)
+    Try /get.php (no credentials) → may return a full M3U playlist.
+    Try /player_api.php?action=get_live_streams → may return JSON stream list.
+
+  Stage 5 — SLUG BRUTE-FORCE (fallback only)
+    Used only when stages 1-4 yield nothing from a domain.
+    Pulls slugs from channels.txt and/or remote playlist URL.
+    Tries each path pattern sequentially per slug — first hit wins.
+
+All discovered stream URLs are verified with ffprobe before inclusion.
+ffprobe validates actual decodability (HLS, MPEG-TS, RTMP, plain HTTP)
+rather than just TCP reachability.
+"""
+
+import os
 import re
-import asyncio
-import aiohttp
-import aiofiles
 import json
+import asyncio
+import logging
 from datetime import datetime as dt
-from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, PlainTextResponse
+from contextlib import asynccontextmanager
+import zoneinfo
+
+from fastapi import FastAPI, WebSocket, HTTPException, Request
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+import aiofiles
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-BASE_DIR    = Path(__file__).parent          # /opt/moj
-WEB_DIR     = BASE_DIR / "web"
-DATA_DIR    = Path("/app")                   # volume-mounted persistent data
-CONFIG_FILE = DATA_DIR / "config.json"
-OUTPUT_FILE = DATA_DIR / "output.m3u"
+SRC_DIR       = "/opt/moj"
+DATA_DIR      = "/app"
+WEB_DIR       = os.path.join(SRC_DIR,  "web")
+STATIC_DIR    = os.path.join(WEB_DIR,  "static")
+CONFIG_FILE   = os.path.join(DATA_DIR, "config.json")
+OUTPUT_FILE   = os.path.join(DATA_DIR, "output.m3u8")
+LOG_FILE      = os.path.join(DATA_DIR, "logs", "app.log")
+CHANNELS_FILE = os.path.join(DATA_DIR, "channels.txt")
 
-app = FastAPI()
-app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
+for _d in [DATA_DIR, os.path.join(DATA_DIR, "logs"), STATIC_DIR]:
+    os.makedirs(_d, exist_ok=True)
 
-# ── STATE ─────────────────────────────────────────────────────────────────────
-state = {
-    "running":       False,
-    "phase":         "idle",
-    "progress":      0,
-    "total":         0,
-    "results":       {},          # channel_name -> {url, domain, status, method}
-    "activeDomains": [],
-    "scanLog":       [],
-    "stats": {
-        "streams_found":    0,
-        "streams_verified": 0,
-        "streams_failed":   0,
-        "streams_healed":   0,    # dead streams that were replaced with a working URL
-    },
-    "moj": {
-        "input":     0,
-        "processed": 0,
-        "working":   0,
-        "failed":    0,
-    },
+# ── Timezone / Logging ─────────────────────────────────────────────────────────
+TZ_NAME  = os.getenv("TZ", "America/Chicago")
+local_tz = zoneinfo.ZoneInfo(TZ_NAME) if TZ_NAME else zoneinfo.ZoneInfo("UTC")
+
+class _LocalFmt(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        return (
+            dt.fromtimestamp(record.created, tz=zoneinfo.ZoneInfo("UTC"))
+            .astimezone(local_tz)
+            .strftime(datefmt or "%Y-%m-%d %H:%M:%S")
+        )
+
+_fmt = _LocalFmt("%(asctime)s %(levelname)-8s %(message)s")
+_fh  = logging.FileHandler(LOG_FILE)
+_sh  = logging.StreamHandler()
+for _h in (_fh, _sh):
+    _h.setFormatter(_fmt)
+logging.basicConfig(level=logging.INFO, handlers=[_fh, _sh])
+log = logging.getLogger(__name__)
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+DEFAULT_CONFIG: dict = {
+    "min_fl":             2,
+    "max_fl":             200,
+    "auto_cycle":         False,
+    "scan_interval":      14400,
+    "stream_timeout":     8,
+    "domain_timeout":     5,
+    "stream_concurrency": 10,
+    "domain_concurrency": 40,
+    "probe_delay_ms":     200,
+    "slug_source":        "both",   # "channels" | "playlist" | "both"
+    "playlist_url":       "",
+    "path_patterns": [
+        "/{slug}/index.m3u8",
+        "/{slug}/index.ts",
+        "/{slug}.m3u8",
+        "/{slug}.ts",
+        "/live/{slug}/index.m3u8",
+        "/live/{slug}/index.ts",
+        "/stream/{slug}/index.m3u8",
+        "/stream/{slug}.m3u8",
+    ],
 }
 
-config = {}
-_ws_clients: set = set()
-
-# ── WebSocket broadcast ────────────────────────────────────────────────────────
-async def broadcast(payload: dict):
-    dead = set()
-    msg  = json.dumps({"type": "state", "data": payload})
-    for ws in _ws_clients:
-        try:
-            await ws.send_text(msg)
-        except Exception:
-            dead.add(ws)
-    _ws_clients.difference_update(dead)
-
-async def push_state():
-    await broadcast(state)
-
-# ── LOG ───────────────────────────────────────────────────────────────────────
-MAX_LOG = 500
-
-def slog(msg: str):
-    ts   = dt.now().strftime("%H:%M:%S")
-    line = f"[{ts}] {msg}"
-    print(line, flush=True)
-    state["scanLog"].append(line)
-    if len(state["scanLog"]) > MAX_LOG:
-        state["scanLog"] = state["scanLog"][-MAX_LOG:]
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.ensure_future(push_state())
-    except Exception:
-        pass
-
-# ── CONFIG ────────────────────────────────────────────────────────────────────
-def load_config():
-    global config
-    defaults = {
-        "min_fl": 2, "max_fl": 200,
-        "healthcheck_enabled": True, "healthcheck_interval": 86400,
-        "healthcheck_batch": 5, "stream_timeout": 10, "domain_timeout": 5,
-        "stream_concurrency": 15, "domain_concurrency": 50, "probe_delay_ms": 200,
-        "slug_source": "both", "playlist_url": "",
-        "path_patterns": [
-            "/{slug}/index.m3u8", "/{slug}/index.ts", "/{slug}.m3u8", "/{slug}.ts",
-            "/live/{slug}/index.m3u8", "/live/{slug}/index.ts",
-            "/stream/{slug}/index.m3u8", "/stream/{slug}.m3u8", "/{slug}/index.m3u",
-        ],
-        "scan_interval": 14400, "auto_cycle": True,
-    }
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE) as f:
-                defaults.update(json.load(f))
-        except Exception as e:
-            print(f"warning: could not load config: {e}")
-    config = defaults
-
-def save_config():
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
-
-# ── NORMALIZATION ─────────────────────────────────────────────────────────────
-def normalize(s: str) -> str:
-    s = re.sub(r"\(.*?\)", "", s.lower())
-    return re.sub(r"[^a-z0-9]", "", s)
-
-def tokenize(s: str):
-    s = re.sub(r"\(.*?\)", "", s.lower())
-    return set(re.sub(r"[^a-z0-9]+", " ", s).split())
-
-ALIASES = {
-    "espn2": ["espn 2", "espn2hd"],
-    "foxsports1": ["fs1"],
-    "nbcsn": ["nbc sports"],
-}
-
-def expand_alias(tokens: set):
-    expanded = set(tokens)
-    joined   = "".join(tokens)
-    for k, vals in ALIASES.items():
-        if k in joined:
-            for v in vals:
-                expanded.update(tokenize(v))
-    return expanded
-
-def score_match(channel_name: str, slug: str) -> float:
-    n1, n2 = normalize(channel_name), normalize(slug)
-    if n1 == n2:
-        return 100.0
-    t1 = expand_alias(tokenize(channel_name))
-    t2 = expand_alias(tokenize(slug))
-    if not t1 or not t2:
-        return 0.0
-    score = len(t1 & t2) / len(t1 | t2)
-    if n1 in n2 or n2 in n1:
-        score += 0.5
-    return score
-
-def find_best_match(channel_name: str, pool: dict, exclude_status: list = None) -> str | None:
-    """
-    Find the best-matching key in pool for channel_name.
-    exclude_status: skip entries whose status is in this list (e.g. ["dead"]).
-    """
-    best_slug, best_score = None, 0.0
-    for slug, info in pool.items():
-        if exclude_status and info.get("status") in exclude_status:
-            continue
-        s = score_match(channel_name, slug)
-        if s > best_score:
-            best_score, best_slug = s, slug
-    return best_slug if best_score >= 0.3 else None
-
-# ── MOJ PLAYLIST LOADER ───────────────────────────────────────────────────────
-async def load_moj_channels() -> dict:
-    """
-    Load all (MOJ) entries from the configured playlist URL.
-
-    Returns:
-        dict keyed by normalized name:
-            {
-              "name": "ESPN (MOJ)",
-              "original_url": "http://...existing.m3u8",   # URL from the source playlist
-            }
-
-    The original_url is the CURRENT url from the user's playlist. We keep it
-    so we can health-check it first and only re-scan if it's dead.
-    """
-    url = config.get("playlist_url", "")
-    if not url:
-        slog("warning: no playlist_url configured — set it in Settings")
-        return {}
-    moj     = {}
-    current = None
-    try:
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as r:
-                text = await r.text()
-    except Exception as e:
-        slog(f"failed to fetch playlist from {url}: {e}")
-        return {}
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("#EXTINF"):
-            name = line.split(",", 1)[-1].strip()
-            if "(MOJ)" in name:
-                slug    = normalize(name)
-                current = slug
-                moj[slug] = {"name": name, "original_url": None}
-            else:
-                current = None
-        elif line.startswith("http") and current:
-            moj[current]["original_url"] = line
-            current = None
-    slog(f"loaded {len(moj)} MOJ channels from playlist")
-    return moj
-
-# ── DOMAIN DISCOVERY ──────────────────────────────────────────────────────────
-
-# Named subdomains to always probe in addition to fl{N}.moveonjoy.com
-_NAMED_SUBDOMAINS = [
-    "live", "stream", "cdn", "us1", "us2", "us3",
-    "eu1", "eu2", "ca1", "uk1", "ny1", "la1",
-    "tv", "hd", "iptv", "media", "play", "vod",
+# Playlist endpoints tried during master-playlist discovery (Stage 2)
+_PLAYLIST_PATHS = [
+    "/playlist.m3u8",
+    "/playlist.m3u",
+    "/all.m3u8",
+    "/all.m3u",
+    "/channels.m3u8",
+    "/channels.m3u",
+    "/index.m3u8",
+    "/index.m3u",
+    "/live/index.m3u8",
+    "/get.php",         # Xtream no-auth (Stage 4 folded in)
 ]
 
-async def discover_active_domains(session) -> list:
-    min_fl = config.get("min_fl", 1)
-    max_fl = config.get("max_fl", 999)
-    concurrency = config.get("domain_concurrency", 50)
-    sem    = asyncio.Semaphore(concurrency)
-    active = []
-
-    async def check(domain: str):
-        timeout = aiohttp.ClientTimeout(total=config.get("domain_timeout", 8))
-        async with sem:
-            try:
-                async with session.get(f"https://{domain}/", timeout=timeout,
-                                       allow_redirects=True) as r:
-                    if r.status < 500:
-                        active.append(domain)
-            except Exception:
-                pass
-
-    numbered = [f"fl{fl}.moveonjoy.com" for fl in range(min_fl, max_fl + 1)]
-    named    = [f"{sub}.moveonjoy.com"  for sub in _NAMED_SUBDOMAINS]
-    all_hosts = named + numbered   # named first — few hosts, answer fast
-
-    total = len(all_hosts)
-    slog(f"probing {len(named)} named + fl{min_fl}–fl{max_fl} ({total} total) …")
-
-    # Feed hosts through the semaphore in batches equal to concurrency so the
-    # semaphore actually throttles properly and no domain gets silently dropped
-    # due to pre-scheduled tasks racing before the gather resolves.
-    for i in range(0, total, concurrency):
-        batch = all_hosts[i:i + concurrency]
-        await asyncio.gather(*[check(d) for d in batch])
-        state["activeDomains"] = sorted(active)
-        state["progress"]      = i + len(batch)
-        await push_state()
-
-    slog(f"found {len(active)} active domains")
-    return sorted(active)
-
-# ── SLUG PROBE ON A SINGLE DOMAIN ─────────────────────────────────────────────
-def _infer_path_patterns(results: dict) -> list:
-    """
-    Look at verified/healed URLs and extract their path pattern (replacing the
-    slug with {slug}).  Returns a deduplicated list of patterns ordered by
-    frequency, so the most common real-world pattern is tried first.
-    """
-    from urllib.parse import urlparse
-    from collections import Counter
-    counts = Counter()
-    for info in results.values():
-        url = info.get("url")
-        if not url or info.get("status") not in ("verified", "healed"):
-            continue
+def load_config() -> dict:
+    if os.path.exists(CONFIG_FILE):
         try:
-            path = urlparse(url).path          # e.g. /espn/index.m3u8
-            parts = path.strip("/").split("/") # ['espn', 'index.m3u8']
-            # Replace the slug segment (first segment that isn't a fixed keyword)
-            keywords = {"live", "stream", "hls", "vod", "play", "media"}
-            rebuilt = []
-            replaced = False
-            for part in parts:
-                if not replaced and part and part.lower() not in keywords:
-                    rebuilt.append("{slug}")
-                    replaced = True
-                else:
-                    rebuilt.append(part)
-            pattern = "/" + "/".join(rebuilt)
-            counts[pattern] += 1
-        except Exception:
-            pass
-    # Return most-common first, then fall back to configured patterns
-    return [p for p, _ in counts.most_common()]
+            with open(CONFIG_FILE) as f:
+                return {**DEFAULT_CONFIG, **json.load(f)}
+        except Exception as e:
+            log.warning(f"Config load failed, using defaults: {e}")
+    return DEFAULT_CONFIG.copy()
 
-async def probe_slugs_on_domain(session, domain: str, channels: list,
-                                 learned_patterns: list | None = None) -> dict:
-    """Try path patterns for each channel name on one domain. Returns {name: url}."""
-    configured = config.get("path_patterns", ["/{slug}/index.m3u8"])
-    # Learned patterns go first (most likely to match); configured patterns as fallback
-    if learned_patterns:
-        seen = set(learned_patterns)
-        patterns = learned_patterns + [p for p in configured if p not in seen]
-    else:
-        patterns = configured
+def save_config(cfg: dict) -> None:
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
 
-    timeout  = aiohttp.ClientTimeout(total=config.get("stream_timeout", 10))
-    sem      = asyncio.Semaphore(config.get("stream_concurrency", 15))
-    found    = {}
+config: dict = load_config()
 
-    async def probe(channel: str, pattern: str):
-        # Strip the "(MOJ)" provenance tag before normalizing so that
-        # "ESPN (MOJ)" → slug "espn", not "espnmoj".
-        slug = normalize(re.sub(r"\s*\(MOJ\)\s*", "", channel, flags=re.IGNORECASE))
-        url  = f"https://{domain}{pattern.replace('{slug}', slug)}"
-        async with sem:
-            try:
-                async with session.get(url, timeout=timeout) as r:
-                    if r.status == 200:
-                        ct = r.headers.get("Content-Type", "").lower()
-                        # Accept anything that isn't HTML/JSON/XML — CDN servers
-                        # often return text/plain or application/octet-stream for
-                        # HLS manifests, and video/mp2t for TS streams.
-                        is_html = any(x in ct for x in ("text/html", "application/json",
-                                                         "text/xml", "application/xml"))
-                        if not is_html:
-                            return channel, url
-            except Exception:
-                pass
-        return None
+# ── App State ──────────────────────────────────────────────────────────────────
+_INIT_STATS: dict = {
+    "domains_crawled":  0,
+    "streams_found":    0,
+    "streams_verified": 0,
+    "streams_failed":   0,
+    "probes_fired":     0,
+    "discovery_method": {},   # domain → method used ("directory"|"playlist"|"brute")
+}
 
-    results = await asyncio.gather(*[probe(ch, pat) for ch in channels for pat in patterns])
-    for res in results:
-        if res:
-            ch, url = res
-            if ch not in found:
-                found[ch] = url
-    return found
+state: dict = {
+    "phase":         "idle",
+    "running":       False,
+    "progress":      0,
+    "total":         0,
+    "probes_fired":  0,
+    "lastCycleTime": None,
+    "nextCycleIn":   "-",
+    "activeDomains": [],
+    "domainSchemes": {},
+    "results":       {},      # slug → {url, name, domain, method, verified}
+    "stats":         _INIT_STATS.copy(),
+    "scanLog":       [],
+}
 
-# ── HTTP STREAM HEALTH CHECK ──────────────────────────────────────────────────
-async def probe_url(url: str) -> bool:
-    """Check if a stream URL is alive. Tries ffprobe first, falls back to HTTP HEAD."""
+_websockets: list[WebSocket] = []
+_cycle_lock = asyncio.Lock()
+
+# ── WebSocket Broadcast ────────────────────────────────────────────────────────
+def _broadcast(msg: dict) -> None:
+    for ws in _websockets[:]:
+        asyncio.create_task(_safe_send(ws, msg))
+
+async def _safe_send(ws: WebSocket, msg: dict) -> None:
+    try:
+        await ws.send_json(msg)
+    except Exception:
+        if ws in _websockets:
+            _websockets.remove(ws)
+
+def slog(msg: str, level: str = "info") -> None:
+    entry = {"ts": dt.now(local_tz).strftime("%H:%M:%S"), "msg": msg}
+    state["scanLog"].append(entry)
+    if len(state["scanLog"]) > 2000:
+        state["scanLog"] = state["scanLog"][-2000:]
+    getattr(log, level)(f"[Cycle] {msg}")
+    _broadcast({"type": "log",   "entry": entry})
+    _broadcast({"type": "state", "data": state})
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Safari/537.36"
+)
+
+# Extensions we consider valid stream files
+_STREAM_EXTS = {
+    ".m3u8", ".m3u", ".ts", ".mp4", ".mpd",
+    ".flv",  ".avi", ".mkv", ".mov",
+}
+
+# ── Generic subprocess runner ──────────────────────────────────────────────────
+async def _run(
+    *args: str,
+    timeout: int = 10,
+    capture_stdout: bool = True,
+) -> tuple[int, str]:
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "quiet", "-timeout", "5000000", "-i", url,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            *args,
+            stdout=asyncio.subprocess.PIPE if capture_stdout else asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return False
-        return proc.returncode == 0
-    except FileNotFoundError:
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.head(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
-                    return r.status < 400
-        except Exception:
-            return False
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        return proc.returncode, (out or b"").decode(errors="replace")
+    except asyncio.TimeoutError:
+        if proc:
+            try: proc.kill()
+            except Exception: pass
+        return -1, ""
+    except Exception as exc:
+        log.debug(f"subprocess error: {exc}")
+        return -1, ""
 
-# ── MAIN SCAN ─────────────────────────────────────────────────────────────────
-scan_lock = asyncio.Lock()
+# ── HTTP Fetch Helper ──────────────────────────────────────────────────────────
+async def _fetch(url: str, timeout: int = 10) -> tuple[int, str]:
+    """Fetch a URL with curl, return (http_status_code, body_text)."""
+    rc, out = await _run(
+        "curl", "-s", "-L",
+        "--connect-timeout", "4",
+        "--max-time", str(timeout),
+        "--insecure",
+        "-A", _UA,
+        "-w", "\n__STATUS__%{http_code}",
+        url,
+        timeout=timeout + 4,
+    )
+    if rc != 0:
+        return 0, ""
+    # Split body from status sentinel
+    body, _, status_str = out.rpartition("\n__STATUS__")
+    try:
+        status = int(status_str.strip())
+    except ValueError:
+        status = 0
+    return status, body
 
-async def run_scan():
-    if state["running"]:
-        slog("scan already in progress")
-        return
+# ── Stream Verification (ffprobe) ─────────────────────────────────────────────
+async def _verify_stream(url: str, sem: asyncio.Semaphore) -> bool:
+    """
+    Verify any stream URL is live and decodable using ffprobe.
+    Handles HLS (.m3u8), MPEG-TS (.ts), RTMP, plain HTTP video streams.
+    Works over HTTPS without any SSL workaround flags.
+    """
+    t     = max(5, min(int(config.get("stream_timeout", 8)), 30))
+    delay = max(0, int(config.get("probe_delay_ms", 200)))
 
-    async with scan_lock:
-        state.update({
-            "running": True, "phase": "loading",
-            "progress": 0, "total": 0,
-            "scanLog": [], "results": {},
-            "stats": {"streams_found": 0, "streams_verified": 0,
-                      "streams_failed": 0, "streams_healed": 0},
-        })
-        await push_state()
+    async with sem:
+        rc, _ = await _run(
+            "ffprobe",
+            "-v",               "quiet",
+            "-timeout",         str(t * 1_000_000),
+            "-probesize",       "100000",
+            "-analyzeduration", "2000000",
+            "-user_agent",      _UA,
+            "-allowed_extensions", "ALL",
+            "-i",               url,
+            timeout=t + 5,
+            capture_stdout=False,
+        )
+        state["probes_fired"]           += 1
+        state["stats"]["probes_fired"]  += 1
+        if delay > 0:
+            await asyncio.sleep(delay / 1000.0)
 
-        try:
-            connector = aiohttp.TCPConnector(limit=100, ssl=False)
-            async with aiohttp.ClientSession(connector=connector) as session:
+    return rc == 0
 
-                # ── Phase 1: Load MOJ channels from the imported playlist ──
-                slog("phase 1: loading MOJ channels from playlist")
-                state["phase"] = "loading"
-                await push_state()
+# ── Slug Normalization ─────────────────────────────────────────────────────────
+def normalize_slug(raw: str) -> str:
+    s = raw.strip().upper()
+    s = re.sub(r"[^A-Z0-9]+", "_", s)
+    s = re.sub(r"_+", "_", s)
+    return s.strip("_")
 
-                moj_map = await load_moj_channels()
-                # moj_map: {slug -> {name, original_url}}
+# ── Parsers ────────────────────────────────────────────────────────────────────
+def _is_m3u(text: str) -> bool:
+    return "#EXTM3U" in text or "#EXTINF" in text or "#EXT-X-STREAM-INF" in text
 
-                if not moj_map:
-                    slog("no MOJ channels loaded — check playlist_url in Settings")
-                    return
+def _has_stream_ext(path: str) -> bool:
+    ext = os.path.splitext(path.split("?")[0].lower())[1]
+    return ext in _STREAM_EXTS
 
-                # Build the working results dict seeded with current URLs
-                # status = "imported" means we haven't checked it yet
-                results = {}
-                for slug, info in moj_map.items():
-                    results[info["name"]] = {
-                        "url":    info["original_url"],
-                        "domain": _domain_from_url(info["original_url"]),
-                        "status": "imported",
-                        "method": "playlist",
-                    }
+def parse_directory_listing(html: str, base_url: str) -> list[dict]:
+    """
+    Parse Nginx/Apache autoindex HTML.
+    Returns list of {slug, url, name, ext} for all entries that look like
+    stream directories or stream files.
+    """
+    results = []
+    seen    = set()
 
-                state["results"] = results
-                state["total"]   = len(results)
-                await push_state()
+    # Directories: <a href="SLUG/">  →  probe SLUG/index.m3u8 etc.
+    for slug in re.findall(r'href="([A-Za-z0-9_\-\.]+)/"', html):
+        upper = slug.upper()
+        if upper in {"STATIC", "ASSETS", "JS", "CSS", "IMG", "IMAGES", "FONTS", "MEDIA"}:
+            continue
+        if upper not in seen:
+            seen.add(upper)
+            # We have the directory but not the final stream file yet;
+            # record it and we'll discover the file extension during verification.
+            results.append({
+                "slug":   upper,
+                "name":   upper.replace("_", " ").title(),
+                "dir_url": base_url.rstrip("/") + f"/{slug}",
+                "url":    None,   # resolved during verification
+                "method": "directory",
+            })
 
-                # ── Phase 2: Health-check all imported URLs ────────────────
-                slog(f"phase 2: health-checking {len(results)} imported MOJ streams")
-                state["phase"]    = "healthcheck"
-                state["progress"] = 0
-                await push_state()
+    # Stream files directly in root: <a href="CHANNEL.m3u8">
+    for href in re.findall(r'href="([A-Za-z0-9_\-\.]+)"', html):
+        if _has_stream_ext(href):
+            slug = normalize_slug(os.path.splitext(href)[0])
+            if slug not in seen:
+                seen.add(slug)
+                results.append({
+                    "slug":   slug,
+                    "name":   slug.replace("_", " ").title(),
+                    "dir_url": None,
+                    "url":    base_url.rstrip("/") + f"/{href}",
+                    "method": "directory",
+                })
 
-                batch = config.get("healthcheck_batch", 5)
-                items = list(results.items())
-                dead_channels = []   # channel names whose stream is broken
+    return results
 
-                for i in range(0, len(items), batch):
-                    chunk = items[i:i + batch]
+def parse_m3u_content(text: str, base_url: str) -> list[dict]:
+    """
+    Parse an M3U/M3U8 file — handles both:
+      - Regular playlists (#EXTINF + URL)
+      - HLS master manifests (#EXT-X-STREAM-INF + relative path)
+    Returns list of {slug, url, name, method}.
+    """
+    results = []
+    seen    = set()
+    lines   = text.splitlines()
 
-                    # Only probe items that actually have a URL; track their
-                    # names separately so we can zip results back correctly.
-                    probed_names = [ch for ch, info in chunk if info["url"]]
-                    probe_tasks  = [probe_url(results[ch]["url"]) for ch in probed_names]
-                    probe_results = await asyncio.gather(*probe_tasks)
-                    ok_map = dict(zip(probed_names, probe_results))
+    def _abs(url: str) -> str:
+        if url.startswith("http"):
+            return url
+        return base_url.rstrip("/") + "/" + url.lstrip("/")
 
-                    for ch_name, info in chunk:
-                        if not info["url"]:
-                            results[ch_name]["status"] = "no_url"
-                            dead_channels.append(ch_name)
-                            state["stats"]["streams_failed"] += 1
-                        elif ok_map[ch_name]:
-                            results[ch_name]["status"] = "verified"
-                            state["stats"]["streams_verified"] += 1
-                        else:
-                            results[ch_name]["status"] = "dead"
-                            dead_channels.append(ch_name)
-                            state["stats"]["streams_failed"] += 1
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
 
-                    state["progress"] = i + len(chunk)
-                    state["results"]  = results
-                    await push_state()
-                    await asyncio.sleep(config.get("probe_delay_ms", 200) / 1000)
+        # Regular playlist entry
+        if line.startswith("#EXTINF"):
+            name_m = re.search(r',(.+)$', line)
+            name   = name_m.group(1).strip() if name_m else None
+            # Skip (MOJ-R) markers
+            if name:
+                name = re.sub(r'\(MOJ-R\)', '', name).strip()
+            # Look ahead for the URL
+            for j in range(i + 1, min(i + 4, len(lines))):
+                next_line = lines[j].strip()
+                if next_line and not next_line.startswith("#"):
+                    url  = _abs(next_line)
+                    slug = _slug_from_url(url)
+                    if slug and slug not in seen:
+                        seen.add(slug)
+                        results.append({
+                            "slug":   slug,
+                            "name":   name or slug.replace("_", " ").title(),
+                            "url":    url,
+                            "method": "playlist",
+                        })
+                    i = j
+                    break
 
-                slog(f"health check done: {state['stats']['streams_verified']} live, "
-                     f"{len(dead_channels)} dead/missing")
+        # HLS master manifest entry
+        elif line.startswith("#EXT-X-STREAM-INF"):
+            for j in range(i + 1, min(i + 4, len(lines))):
+                next_line = lines[j].strip()
+                if next_line and not next_line.startswith("#"):
+                    url  = _abs(next_line)
+                    slug = _slug_from_url(url)
+                    if slug and slug not in seen:
+                        seen.add(slug)
+                        results.append({
+                            "slug":   slug,
+                            "name":   slug.replace("_", " ").title(),
+                            "url":    url,
+                            "method": "playlist",
+                        })
+                    i = j
+                    break
 
-                # ── Phase 3: Domain discovery (only if there are dead streams) ──
-                # Also pull in channels.txt entries as additional heal candidates
-                # when slug_source is "both" or "channels".
-                slug_source = config.get("slug_source", "both")
-                if slug_source in ("both", "channels"):
-                    channels_file = DATA_DIR / "channels.txt"
-                    if channels_file.exists():
-                        extra = [
-                            l.strip() for l in channels_file.read_text().splitlines()
-                            if l.strip() and not l.startswith("#")
-                        ]
-                        # Add any channels.txt entry not already tracked in results
-                        for ch in extra:
-                            if ch not in results:
-                                results[ch] = {
-                                    "url":    None,
-                                    "domain": "",
-                                    "status": "no_url",
-                                    "method": "channels_txt",
-                                }
-                                dead_channels.append(ch)
-                                state["stats"]["streams_failed"] += 1
-                        if extra:
-                            slog(f"added {len(extra)} channels.txt entries to heal candidates")
-                if dead_channels:
-                    slog(f"phase 3: {len(dead_channels)} streams need new URLs — scanning domains")
-                    state["phase"]    = "discovering"
-                    state["progress"] = 0
-                    state["total"]    = 200   # approximate
-                    await push_state()
+        # Bare URL line (no #EXTINF header)
+        elif line.startswith("http") and _has_stream_ext(line.split("?")[0]):
+            slug = _slug_from_url(line)
+            if slug and slug not in seen:
+                seen.add(slug)
+                results.append({
+                    "slug":   slug,
+                    "name":   slug.replace("_", " ").title(),
+                    "url":    line,
+                    "method": "playlist",
+                })
 
-                    domains = await discover_active_domains(session)
-                    state["activeDomains"] = domains
-                    state["total"]         = len(domains)
+        i += 1
 
-                    if not domains:
-                        slog("no active moveonjoy.com domains found — cannot heal dead streams")
-                    else:
-                        # ── Phase 4: Re-scan dead channels across all domains ──
-                        # Learn path patterns from the verified URLs we already have
-                        learned = _infer_path_patterns(results)
-                        if learned:
-                            slog(f"learned {len(learned)} path pattern(s) from verified URLs: "
-                                 + ", ".join(learned[:3]))
-                        else:
-                            slog("no verified URLs to learn patterns from — using configured patterns")
+    return results
 
-                        slog(f"phase 4: re-scanning {len(dead_channels)} dead channels across "
-                             f"{len(domains)} domains")
-                        state["phase"]    = "scanning"
-                        state["progress"] = 0
-                        await push_state()
+def parse_xtream_json(text: str, base_url: str) -> list[dict]:
+    """
+    Parse Xtream Codes JSON stream list.
+    Constructs stream URLs from stream_id or direct_source field.
+    """
+    results = []
+    seen    = set()
+    try:
+        data = json.loads(text)
+        if not isinstance(data, list):
+            return []
+        for item in data:
+            name      = item.get("name", "")
+            stream_id = item.get("stream_id")
+            direct    = item.get("direct_source", "")
+            ext       = item.get("container_extension", "m3u8")
 
-                        for i, domain in enumerate(domains):
-                            # Only probe channels that are still dead/missing
-                            still_dead = [ch for ch in dead_channels
-                                          if results[ch]["status"] in ("dead", "no_url")]
-                            if not still_dead:
-                                slog("all dead streams healed — stopping domain sweep early")
-                                break
+            if direct and direct.startswith("http"):
+                url = direct
+            elif stream_id:
+                url = f"{base_url.rstrip('/')}/{stream_id}.{ext}"
+            else:
+                continue
 
-                            found = await probe_slugs_on_domain(session, domain, still_dead,
-                                                                 learned_patterns=learned)
-                            for ch_name, url in found.items():
-                                slog(f"  healed: {ch_name}  →  {url}")
-                                results[ch_name] = {
-                                    "url":    url,
-                                    "domain": domain,
-                                    "status": "healed",
-                                    "method": "rescan",
-                                }
-                                state["stats"]["streams_healed"]   += 1
-                                state["stats"]["streams_verified"] += 1
-                                state["stats"]["streams_failed"]   -= 1
+            slug = normalize_slug(name) if name else _slug_from_url(url)
+            if slug and slug not in seen:
+                seen.add(slug)
+                results.append({
+                    "slug":   slug,
+                    "name":   name or slug.replace("_", " ").title(),
+                    "url":    url,
+                    "method": "xtream",
+                })
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return results
 
-                            state["progress"] = i + 1
-                            state["results"]  = results
-                            if found:
-                                slog(f"  {domain}: healed {len(found)}")
-                            await push_state()
+def _slug_from_url(url: str) -> str | None:
+    """Extract a slug from a stream URL path."""
+    # /SLUG/index.ext  or  /SLUG.ext
+    m = re.search(r"/([A-Za-z0-9_\-]+)/[^/]*\.[a-z0-9]+$", url)
+    if m:
+        return normalize_slug(m.group(1))
+    m = re.search(r"/([A-Za-z0-9_\-]+)\.[a-z0-9]{2,5}(?:\?|$)", url)
+    if m:
+        return normalize_slug(m.group(1))
+    return None
 
-                        healed_total = state["stats"]["streams_healed"]
-                        still_broken = len([c for c in dead_channels
-                                            if results[c]["status"] in ("dead", "no_url")])
-                        slog(f"rescan done: {healed_total} healed, {still_broken} still broken")
-                else:
-                    slog("all imported streams are live — no domain scan needed")
+# ── Domain Reachability ────────────────────────────────────────────────────────
+async def _check_domain(fl: int, sem: asyncio.Semaphore) -> dict | None:
+    domain  = f"fl{fl}.moveonjoy.com"
+    timeout = int(config.get("domain_timeout", 5))
+    async with sem:
+        for scheme in ("https", "http"):
+            rc, code = await _run(
+                "curl", "-s",
+                "--connect-timeout", "3",
+                "--max-time", str(timeout),
+                "--insecure", "--location",
+                "-A", _UA,
+                "-o", "/dev/null",
+                "-w", "%{http_code}",
+                f"{scheme}://{domain}",
+                timeout=timeout + 3,
+            )
+            if code.strip() in {"200", "301", "302", "403", "404"}:
+                return {"domain": domain, "scheme": scheme}
+    return None
 
-                # ── Phase 5: Write output playlist ────────────────────────
-                slog("phase 5: writing output playlist")
-                state["phase"] = "writing"
-                await push_state()
+# ── Stage 1: Directory Listing ─────────────────────────────────────────────────
+async def _discover_directory(base_url: str) -> list[dict]:
+    """GET / and parse Nginx/Apache autoindex HTML."""
+    status, body = await _fetch(base_url + "/", timeout=8)
+    if status not in {200, 403} or not body:
+        return []
+    # Must look like HTML directory listing
+    if "<a href=" not in body.lower():
+        return []
+    results = parse_directory_listing(body, base_url)
+    return results
 
-                await _write_playlist(results)
-                state["results"] = results
+# ── Stage 2 & 4: Master Playlist / Xtream ─────────────────────────────────────
+async def _discover_playlist(base_url: str) -> list[dict]:
+    """
+    Try each playlist endpoint in turn.
+    Returns parsed stream list from the first endpoint that responds with
+    valid M3U content or Xtream JSON.
+    """
+    for path in _PLAYLIST_PATHS:
+        url            = base_url.rstrip("/") + path
+        status, body   = await _fetch(url, timeout=10)
+        if status not in {200} or not body or len(body) < 20:
+            continue
 
-                v = state["stats"]["streams_verified"]
-                f = state["stats"]["streams_failed"]
-                h = state["stats"]["streams_healed"]
-                slog(f"done — {v} working ({h} healed), {f} still broken")
+        # Try M3U parse
+        if _is_m3u(body):
+            results = parse_m3u_content(body, base_url)
+            if results:
+                return results
 
-        except Exception as e:
-            slog(f"scan error: {e}")
-        finally:
-            state["running"]  = False
-            state["phase"]    = "idle"
-            state["progress"] = state["total"]
-            await push_state()
+        # Try Xtream JSON
+        if body.lstrip().startswith("[") or body.lstrip().startswith("{"):
+            results = parse_xtream_json(body, base_url)
+            if results:
+                return results
+
+    return []
+
+# ── Stage 5: Slug Brute-Force (fallback) ──────────────────────────────────────
+def _slugs_from_txt(path: str) -> list[str]:
+    if not os.path.exists(path):
+        return []
+    slugs = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                slug = normalize_slug(line)
+                if slug:
+                    slugs.append(slug)
+    return slugs
+
+def _slugs_from_m3u_text(content: str) -> list[str]:
+    slugs: set[str] = set()
+    for url in re.findall(r"https?://[^\s]+", content):
+        s = _slug_from_url(url)
+        if s:
+            slugs.add(s)
+    for name in re.findall(r"#EXTINF:[^,]*,(.+)", content):
+        s = normalize_slug(name.replace("(MOJ-R)", "").strip())
+        if s:
+            slugs.add(s)
+    return list(slugs)
 
 
-def _domain_from_url(url: str | None) -> str:
+async def _load_playlist_channels() -> list[dict]:
+    """
+    Fetch the remote playlist and return a list of {slug, name, url} dicts
+    for every entry found.  Strips (MOJ)/(MOJ-R) provenance tags from names.
+    Returns [] if no playlist_url is configured or the fetch fails.
+    """
+    url = config.get("playlist_url", "").strip()
+    if not url:
+        return []
+    rc, body = await _run(
+        "curl", "-L", "-k", "-s", "-f", "-A", _UA,
+        "--max-time", "30", url,
+        timeout=35, capture_stdout=True,
+    )
+    if rc != 0 or not body:
+        slog(f"  Remote playlist fetch failed (exit {rc})", "warning")
+        return []
+    channels = parse_m3u_content(body, "")   # URLs are absolute; base_url unused
+    slog(f"  Remote playlist: {len(channels)} channel(s) parsed")
+    return channels
+
+
+async def _build_fallback_slugs(
+    extra_slugs: list[str] | None = None,
+) -> list[str]:
+    """
+    Build the slug list for Stage-5 brute-force.
+    extra_slugs: dead slugs forwarded from the playlist import phase.
+    channels.txt entries always included when slug_source allows.
+    """
+    source = config.get("slug_source", "both")
+    seen:  set[str]  = set()
+    slugs: list[str] = []
+
+    def _add(new: list[str], label: str) -> None:
+        added = sum(1 for s in new if s and s not in seen and not seen.add(s) and slugs.append(s) is None)  # noqa
+        slog(f"  {label}: +{added} slug(s)  (total {len(slugs)})")
+
+    # Dead playlist slugs first — most likely to match via brute-force
+    if extra_slugs:
+        _add(extra_slugs, "dead playlist slugs")
+
+    if source in ("channels", "both"):
+        _add(_slugs_from_txt(CHANNELS_FILE), "channels.txt")
+
+    return sorted(set(slugs))
+
+async def _brute_force_domain(
+    base_url: str,
+    slugs: list[str],
+    sem: asyncio.Semaphore,
+) -> list[dict]:
+    """Try each slug × pattern sequentially, return found streams."""
+    patterns = config.get("path_patterns", DEFAULT_CONFIG["path_patterns"])
+    found    = []
+
+    async def _try_slug(slug: str) -> dict | None:
+        for pattern in patterns:
+            url = base_url.rstrip("/") + pattern.replace("{slug}", slug)
+            ok  = await _verify_stream(url, sem)
+            if ok:
+                return {
+                    "slug":   slug,
+                    "name":   slug.replace("_", " ").title(),
+                    "url":    url,
+                    "method": "brute",
+                }
+        return None
+
+    tasks   = [_try_slug(s) for s in slugs]
+    results = await asyncio.gather(*tasks)
+    found   = [r for r in results if r]
+    return found
+
+# ── Per-Domain Discovery ───────────────────────────────────────────────────────
+async def _discover_domain(
+    domain: str,
+    scheme: str,
+    fallback_slugs: list[str],
+    sem: asyncio.Semaphore,
+) -> tuple[list[dict], str]:
+    """
+    Run the full discovery pipeline for one domain.
+    Returns (stream_list, method_used).
+    Streams have keys: slug, name, url (may be None for dir entries), method.
+    """
+    base_url = f"{scheme}://{domain}"
+
+    # Stage 1 — Directory listing
+    slog(f"  [{domain}] Stage 1: directory listing …")
+    streams = await _discover_directory(base_url)
+    if streams:
+        slog(f"  [{domain}] Directory listing → {len(streams)} entr(ies)")
+        return streams, "directory"
+
+    # Stage 2/4 — Master playlist / Xtream
+    slog(f"  [{domain}] Stage 2: master playlist / Xtream …")
+    streams = await _discover_playlist(base_url)
+    if streams:
+        slog(f"  [{domain}] Playlist → {len(streams)} stream(s)")
+        return streams, "playlist"
+
+    # Stage 5 — Brute-force fallback
+    if fallback_slugs:
+        slog(f"  [{domain}] Stage 5: brute-force {len(fallback_slugs)} slug(s) …")
+        streams = await _brute_force_domain(base_url, fallback_slugs, sem)
+        if streams:
+            slog(f"  [{domain}] Brute-force → {len(streams)} hit(s)")
+        return streams, "brute"
+
+    return [], "none"
+
+# ── Resolve Directory Entries ──────────────────────────────────────────────────
+async def _resolve_dir_entry(
+    entry: dict,
+    sem: asyncio.Semaphore,
+) -> dict | None:
+    """
+    For directory-listing entries we have the directory URL but not the
+    exact stream file.  Try common file names inside the directory.
+    """
+    if entry.get("url"):
+        # Already have a direct URL (file in root listing)
+        if await _verify_stream(entry["url"], sem):
+            return entry
+        return None
+
+    dir_url  = entry["dir_url"]
+    patterns = [
+        "/index.m3u8",
+        "/index.ts",
+        "/index.m3u",
+        "/stream.m3u8",
+        "/stream.ts",
+        "/live.m3u8",
+    ]
+    for pat in patterns:
+        url = dir_url.rstrip("/") + pat
+        if await _verify_stream(url, sem):
+            return {**entry, "url": url}
+    return None
+
+# ── Verify Discovered Streams ──────────────────────────────────────────────────
+async def _verify_all(
+    streams: list[dict],
+    method: str,
+    sem: asyncio.Semaphore,
+) -> list[dict]:
+    """
+    Verify all discovered stream URLs with ffprobe.
+    Directory entries without a URL are resolved first.
+    """
+    verified = []
+
+    async def _check(entry: dict) -> dict | None:
+        if method == "directory" and entry.get("url") is None:
+            resolved = await _resolve_dir_entry(entry, sem)
+            return resolved
+        else:
+            if await _verify_stream(entry["url"], sem):
+                return entry
+        return None
+
+    results = await asyncio.gather(*[_check(e) for e in streams])
+    verified = [r for r in results if r]
+    return verified
+
+
+# ── Phase 0: Import & health-check existing playlist ─────────────────────────
+async def _phase_import_playlist(
+    seen_slugs: set[str],
+    sem: asyncio.Semaphore,
+) -> list[str]:
+    """
+    Fetch the configured playlist URL, health-check every stream with ffprobe,
+    and seed state["results"] with channels that are still alive.
+
+    Returns a list of slugs whose URLs are dead (to be passed as extra_slugs
+    to _build_fallback_slugs so they get re-scanned via brute-force).
+    """
+    source = config.get("slug_source", "both")
+    if source not in ("playlist", "both"):
+        return []
+
+    state["phase"] = "importing"
+    slog("━━━ Phase 0: importing remote playlist ━━━")
+    channels = await _load_playlist_channels()
+    if not channels:
+        slog("  No playlist channels — skipping import phase")
+        return []
+
+    slog(f"  Health-checking {len(channels)} imported stream(s) …")
+    dead_slugs: list[str] = []
+
+    async def _check_one(ch: dict) -> None:
+        slug = ch["slug"]
+        url  = ch.get("url")
+        name = ch.get("name") or slug.replace("_", " ").title()
+
+        if not url:
+            dead_slugs.append(slug)
+            return
+
+        alive = await _verify_stream(url, sem)
+        if alive:
+            if slug not in seen_slugs:
+                seen_slugs.add(slug)
+                state["results"][slug] = {
+                    "url":    url,
+                    "name":   name,
+                    "domain": _domain_from_url(url),
+                    "method": "imported",
+                }
+                state["stats"]["streams_verified"] += 1
+                state["stats"]["streams_found"]    += 1
+                state["progress"]                  += 1
+        else:
+            dead_slugs.append(slug)
+
+    await asyncio.gather(*[_check_one(ch) for ch in channels])
+
+    alive_count = len(channels) - len(dead_slugs)
+    slog(
+        f"  Import done: {alive_count} alive (kept), "
+        f"{len(dead_slugs)} dead (will re-scan)"
+    )
+    _broadcast({"type": "state", "data": state})
+    return dead_slugs
+
+
+def _domain_from_url(url: str) -> str:
     if not url:
         return ""
-    try:
-        from urllib.parse import urlparse
-        return urlparse(url).hostname or ""
-    except Exception:
-        return ""
+    m = re.search(r"https?://([^/]+)", url)
+    return m.group(1) if m else ""
 
+# ── Scan Phases ────────────────────────────────────────────────────────────────
+async def _phase_domains() -> list[dict]:
+    state["phase"] = "domains"
+    mn, mx = int(config["min_fl"]), int(config["max_fl"])
+    slog(f"━━━ Domain sweep fl{mn}–fl{mx} ({mx - mn + 1} hosts) ━━━")
+    sem = asyncio.Semaphore(int(config.get("domain_concurrency", 40)))
+    raw = await asyncio.gather(*[_check_domain(fl, sem) for fl in range(mn, mx + 1)])
+    active = sorted([r for r in raw if r], key=lambda x: x["domain"])
+    state["domainSchemes"] = {r["domain"]: r["scheme"] for r in active}
+    state["activeDomains"] = [r["domain"] for r in active]
+    slog(f"Found {len(active)} active domain(s): {', '.join(r['domain'] for r in active)}")
+    _broadcast({"type": "state", "data": state})
+    if not active:
+        raise RuntimeError("No active domains found.")
+    return active
 
-# ── PLAYLIST WRITE ────────────────────────────────────────────────────────────
-async def _write_playlist(results: dict):
-    """
-    Write output.m3u containing every MOJ channel that has a working URL.
-    Channels whose status is 'dead' or 'no_url' are excluded.
-    """
-    lines    = ["#EXTM3U\n"]
-    working  = 0
-    excluded = 0
+async def _phase_discover(
+    domains: list[dict],
+    seen_slugs: set[str],
+    dead_slugs: list[str],
+    sem: asyncio.Semaphore,
+) -> None:
+    state["phase"] = "discovering"
 
-    for ch_name, info in results.items():
-        if not info.get("url") or info.get("status") in ("dead", "no_url"):
-            excluded += 1
+    # Build fallback slug list (used only if all auto-discovery stages fail)
+    slog("━━━ Preparing fallback slug list ━━━")
+    fallback_slugs = await _build_fallback_slugs(extra_slugs=dead_slugs)
+    slog(f"  Fallback: {len(fallback_slugs)} slug(s) ready")
+
+    for domain_info in domains:
+        domain   = domain_info["domain"]
+        scheme   = domain_info["scheme"]
+        base_url = f"{scheme}://{domain}"
+
+        slog(f"━━━ Discovering {domain} ━━━")
+        streams, method = await _discover_domain(domain, scheme, fallback_slugs, sem)
+
+        if not streams:
+            slog(f"  [{domain}] Nothing found.")
             continue
-        lines.append(
-            f'#EXTINF:-1 tvg-id="{normalize(ch_name)}" '
-            f'tvg-name="{ch_name}" group-title="MOJ",{ch_name}\n'
-        )
-        lines.append(info["url"] + "\n")
-        working += 1
 
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    async with aiofiles.open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        state["stats"]["domains_crawled"] += 1
+        state["stats"]["discovery_method"][domain] = method
+
+        # Deduplicate: skip slugs already resolved by a previous domain
+        new_streams = [s for s in streams if s["slug"] not in seen_slugs]
+        skipped     = len(streams) - len(new_streams)
+        if skipped:
+            slog(f"  [{domain}] Skipping {skipped} slug(s) already found on earlier domain.")
+
+        if not new_streams:
+            continue
+
+        state["total"] += len(new_streams)
+        slog(f"  [{domain}] Verifying {len(new_streams)} stream(s) via ffprobe …")
+        verified = await _verify_all(new_streams, method, sem)
+
+        for entry in verified:
+            slug = entry["slug"]
+            if slug in seen_slugs:
+                continue
+            seen_slugs.add(slug)
+            state["results"][slug] = {
+                "url":    entry["url"],
+                "name":   entry.get("name", slug.replace("_", " ").title()),
+                "domain": domain,
+                "method": method,
+            }
+            state["stats"]["streams_verified"] += 1
+            state["progress"]                  += 1
+
+        # Mark failed (discovered but not verified)
+        failed_entries = [s for s in new_streams if s["slug"] not in seen_slugs]
+        for entry in failed_entries:
+            slug = entry["slug"]
+            seen_slugs.add(slug)
+            state["results"][slug] = {
+                "url":    None,
+                "name":   entry.get("name", slug.replace("_", " ").title()),
+                "domain": domain,
+                "method": method,
+            }
+            state["stats"]["streams_failed"] += 1
+            state["progress"]                += 1
+
+        state["stats"]["streams_found"] += len(verified)
+        slog(
+            f"  [{domain}] ✓ {len(verified)} verified  |  "
+            f"{len(new_streams) - len(verified)} failed  |  "
+            f"method: {method}"
+        )
+        _broadcast({"type": "state", "data": state})
+
+async def _phase_write() -> None:
+    lines       = ["#EXTM3U\n"]
+    found_count = 0
+    for slug, info in sorted(state["results"].items()):
+        if not info.get("url"):
+            continue
+        name   = info.get("name") or slug.replace("_", " ").title()
+        extinf = (
+            f'#EXTINF:-1 tvg-id="{slug}" tvg-name="{name}" '
+            f'group-title="MOJ",{name}'
+        )
+        lines.append(extinf + "\n")
+        lines.append(info["url"] + "\n")
+        found_count += 1
+
+    async with aiofiles.open(OUTPUT_FILE, "w", encoding="utf-8", newline="\n") as f:
         await f.write("".join(lines))
 
-    state["moj"] = {
-        "input":     len(results),
-        "processed": len(results),
-        "working":   working,
-        "failed":    excluded,
-    }
-    slog(f"playlist written: {working} channels, {excluded} excluded (dead/no_url)")
+    state["lastCycleTime"] = dt.now(local_tz).strftime("%H:%M:%S")
+    slog(f"✓ Scan complete — {found_count} working stream(s) written to output playlist.")
 
+# ── Main Scan Cycle ────────────────────────────────────────────────────────────
+async def run_cycle() -> None:
+    if _cycle_lock.locked():
+        log.warning("Cycle already running; skipping duplicate request.")
+        return
 
-# ── API ROUTES ────────────────────────────────────────────────────────────────
-@app.get("/")
-def index():
-    return FileResponse(str(WEB_DIR / "index.html"))
+    async with _cycle_lock:
+        state.update({
+            "running":      True,
+            "results":      {},
+            "stats":        _INIT_STATS.copy(),
+            "scanLog":      [],
+            "progress":     0,
+            "probes_fired": 0,
+            "total":        0,
+        })
+        _broadcast({"type": "state", "data": state})
 
-@app.get("/api/state")
-def api_state():
-    return state
+        try:
+            sem        = asyncio.Semaphore(int(config.get("stream_concurrency", 10)))
+            seen_slugs: set[str] = set()
+            dead_slugs = await _phase_import_playlist(seen_slugs, sem)
+            domains    = await _phase_domains()
+            await _phase_discover(domains, seen_slugs, dead_slugs, sem)
+            await _phase_write()
+        except RuntimeError as exc:
+            slog(str(exc), "error")
+        except Exception as exc:
+            log.exception(f"Unhandled error in run_cycle: {exc}")
+            slog(f"Unexpected error: {exc}", "error")
+        finally:
+            state.update({"running": False, "phase": "idle"})
+            _broadcast({"type": "state", "data": state})
 
-@app.get("/api/config")
-def api_get_config():
-    return config
+# ── Scheduler ─────────────────────────────────────────────────────────────────
+async def _scheduler() -> None:
+    while True:
+        if not config.get("auto_cycle", False):
+            state["nextCycleIn"] = "disabled"
+            _broadcast({"type": "state", "data": state})
+            await asyncio.sleep(15)
+            continue
 
-@app.post("/api/config")
-async def api_save_config(body: dict):
-    config.update(body)
-    save_config()
-    return {"ok": True}
+        interval = int(config.get("scan_interval", 14400))
+        for remaining in range(interval, 0, -1):
+            if not config.get("auto_cycle", False):
+                break
+            h, rem = divmod(remaining, 3600)
+            m, s   = divmod(rem, 60)
+            state["nextCycleIn"] = f"{h:02d}:{m:02d}:{s:02d}"
+            _broadcast({"type": "state", "data": state})
+            await asyncio.sleep(1)
+        else:
+            log.info("Auto-cycle triggered by scheduler.")
+            asyncio.create_task(run_cycle())
 
-@app.post("/api/scan/start")
-async def api_scan_start():
-    if state["running"]:
-        return {"ok": False, "reason": "already running"}
-    asyncio.ensure_future(run_scan())
-    return {"ok": True}
+# ── FastAPI App ────────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    asyncio.create_task(_scheduler())
+    yield   # no auto-run on startup
 
-@app.post("/api/scan/stop")
-async def api_scan_stop():
-    state["running"] = False
-    state["phase"]   = "idle"
-    await push_state()
-    return {"ok": True}
+app = FastAPI(title="MOJ Discovery", lifespan=_lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"])
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# Legacy alias used by the HTML's triggerRun()
-@app.post("/api/run")
-async def api_run():
-    return await api_scan_start()
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    async with aiofiles.open(os.path.join(WEB_DIR, "index.html")) as f:
+        return HTMLResponse(await f.read())
 
 @app.get("/playlist")
-async def playlist():
-    if OUTPUT_FILE.exists():
-        return FileResponse(str(OUTPUT_FILE), media_type="application/x-mpegurl")
-    return PlainTextResponse("#EXTM3U\n# No playlist generated yet — run a scan\n",
-                              media_type="application/x-mpegurl")
+async def get_playlist():
+    if not os.path.exists(OUTPUT_FILE):
+        raise HTTPException(404, "Playlist not ready yet.")
+    return FileResponse(OUTPUT_FILE, media_type="application/x-mpegurl")
+
+@app.get("/api/state")
+async def api_state():
+    return JSONResponse(state)
+
+@app.get("/api/config")
+async def api_get_config():
+    return JSONResponse(config)
+
+@app.post("/api/config")
+async def api_post_config(request: Request):
+    global config
+    config.update(await request.json())
+    save_config(config)
+    return {"status": "ok"}
 
 @app.get("/api/channels")
 async def api_get_channels():
-    channels_file = DATA_DIR / "channels.txt"
-    if channels_file.exists():
-        lines = [l.strip() for l in channels_file.read_text().splitlines()
-                 if l.strip() and not l.startswith("#")]
-    else:
-        lines = []
+    if not os.path.exists(CHANNELS_FILE):
+        return {"channels": []}
+    with open(CHANNELS_FILE, encoding="utf-8", errors="replace") as f:
+        lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
     return {"channels": lines}
 
 @app.post("/api/channels")
-async def api_save_channels(body: dict):
-    channels = body.get("channels", [])
-    channels_file = DATA_DIR / "channels.txt"
-    channels_file.parent.mkdir(parents=True, exist_ok=True)
-    channels_file.write_text("\n".join(channels) + "\n")
-    return {"ok": True, "count": len(channels)}
+async def api_post_channels(request: Request):
+    data = await request.json()
+    lines = data.get("channels", [])
+    async with aiofiles.open(CHANNELS_FILE, "w", encoding="utf-8") as f:
+        await f.write("\n".join(lines) + "\n")
+    return {"status": "ok", "count": len(lines)}
+
+@app.post("/api/run")
+async def api_run():
+    if state["running"]:
+        raise HTTPException(409, "A scan cycle is already running.")
+    asyncio.create_task(run_cycle())
+    return {"status": "started"}
 
 @app.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    _ws_clients.add(websocket)
+async def ws_endpoint(ws: WebSocket):
+    await ws.accept()
+    _websockets.append(ws)
     try:
-        await websocket.send_text(json.dumps({"type": "state", "data": state}))
+        await ws.send_json({"type": "state", "data": state})
         while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
+            await ws.receive_text()
+    except Exception:
         pass
     finally:
-        _ws_clients.discard(websocket)
+        if ws in _websockets:
+            _websockets.remove(ws)
 
-# ── STARTUP ───────────────────────────────────────────────────────────────────
-@app.on_event("startup")
-async def startup():
-    load_config()
-    slog("MOJFixxer ready")
-    if config.get("auto_cycle", True):
-        interval = config.get("scan_interval", 14400)
-        async def loop():
-            await asyncio.sleep(5)
-            while True:
-                await run_scan()
-                slog(f"next auto-scan in {interval}s")
-                await asyncio.sleep(interval)
-        asyncio.ensure_future(loop())
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
