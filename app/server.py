@@ -542,11 +542,21 @@ def _slugs_from_m3u_text(content: str) -> list[str]:
     return list(slugs)
 
 
+def _domain_from_url(url: str) -> str:
+    if not url:
+        return ""
+    m = re.search(r"https?://([^/:]+)", url)
+    return m.group(1) if m else ""
+
+def _strip_moj(name: str) -> str:
+    """Remove (MOJ), (MOJ-R), and similar provenance tags from a channel name."""
+    return re.sub(r"\s*\(MOJ[^)]*\)\s*", "", name, flags=re.IGNORECASE).strip()
+
+
 async def _load_playlist_channels() -> list[dict]:
     """
-    Fetch the remote playlist and return a list of {slug, name, url} dicts
-    for every entry found.  Strips (MOJ)/(MOJ-R) provenance tags from names.
-    Returns [] if no playlist_url is configured or the fetch fails.
+    Fetch the remote playlist URL and return {slug, name, url} for every entry.
+    Names have (MOJ)/(MOJ-R) stripped.  Returns [] if not configured or fetch fails.
     """
     url = config.get("playlist_url", "").strip()
     if not url:
@@ -559,7 +569,10 @@ async def _load_playlist_channels() -> list[dict]:
     if rc != 0 or not body:
         slog(f"  Remote playlist fetch failed (exit {rc})", "warning")
         return []
-    channels = parse_m3u_content(body, "")   # URLs are absolute; base_url unused
+    channels = parse_m3u_content(body, "")   # URLs are absolute
+    # Strip (MOJ) tags from names
+    for ch in channels:
+        ch["name"] = _strip_moj(ch["name"])
     slog(f"  Remote playlist: {len(channels)} channel(s) parsed")
     return channels
 
@@ -567,11 +580,6 @@ async def _load_playlist_channels() -> list[dict]:
 async def _build_fallback_slugs(
     extra_slugs: list[str] | None = None,
 ) -> list[str]:
-    """
-    Build the slug list for Stage-5 brute-force.
-    extra_slugs: dead slugs forwarded from the playlist import phase.
-    channels.txt entries always included when slug_source allows.
-    """
     source = config.get("slug_source", "both")
     seen:  set[str]  = set()
     slugs: list[str] = []
@@ -580,12 +588,25 @@ async def _build_fallback_slugs(
         added = sum(1 for s in new if s and s not in seen and not seen.add(s) and slugs.append(s) is None)  # noqa
         slog(f"  {label}: +{added} slug(s)  (total {len(slugs)})")
 
-    # Dead playlist slugs first — most likely to match via brute-force
+    # Dead playlist slugs go first — most likely to be healable via brute-force
     if extra_slugs:
         _add(extra_slugs, "dead playlist slugs")
 
     if source in ("channels", "both"):
         _add(_slugs_from_txt(CHANNELS_FILE), "channels.txt")
+
+    if source in ("playlist", "both"):
+        url = config.get("playlist_url", "").strip()
+        if url:
+            rc, body = await _run(
+                "curl", "-L", "-k", "-s", "-f", "-A", _UA,
+                "--max-time", "30", url,
+                timeout=35, capture_stdout=True,
+            )
+            if rc == 0 and body:
+                _add(_slugs_from_m3u_text(body), "remote playlist")
+            else:
+                slog(f"  Remote playlist fetch failed (exit {rc})", "warning")
 
     return sorted(set(slugs))
 
@@ -709,75 +730,6 @@ async def _verify_all(
     verified = [r for r in results if r]
     return verified
 
-
-# ── Phase 0: Import & health-check existing playlist ─────────────────────────
-async def _phase_import_playlist(
-    seen_slugs: set[str],
-    sem: asyncio.Semaphore,
-) -> list[str]:
-    """
-    Fetch the configured playlist URL, health-check every stream with ffprobe,
-    and seed state["results"] with channels that are still alive.
-
-    Returns a list of slugs whose URLs are dead (to be passed as extra_slugs
-    to _build_fallback_slugs so they get re-scanned via brute-force).
-    """
-    source = config.get("slug_source", "both")
-    if source not in ("playlist", "both"):
-        return []
-
-    state["phase"] = "importing"
-    slog("━━━ Phase 0: importing remote playlist ━━━")
-    channels = await _load_playlist_channels()
-    if not channels:
-        slog("  No playlist channels — skipping import phase")
-        return []
-
-    slog(f"  Health-checking {len(channels)} imported stream(s) …")
-    dead_slugs: list[str] = []
-
-    async def _check_one(ch: dict) -> None:
-        slug = ch["slug"]
-        url  = ch.get("url")
-        name = ch.get("name") or slug.replace("_", " ").title()
-
-        if not url:
-            dead_slugs.append(slug)
-            return
-
-        alive = await _verify_stream(url, sem)
-        if alive:
-            if slug not in seen_slugs:
-                seen_slugs.add(slug)
-                state["results"][slug] = {
-                    "url":    url,
-                    "name":   name,
-                    "domain": _domain_from_url(url),
-                    "method": "imported",
-                }
-                state["stats"]["streams_verified"] += 1
-                state["stats"]["streams_found"]    += 1
-                state["progress"]                  += 1
-        else:
-            dead_slugs.append(slug)
-
-    await asyncio.gather(*[_check_one(ch) for ch in channels])
-
-    alive_count = len(channels) - len(dead_slugs)
-    slog(
-        f"  Import done: {alive_count} alive (kept), "
-        f"{len(dead_slugs)} dead (will re-scan)"
-    )
-    _broadcast({"type": "state", "data": state})
-    return dead_slugs
-
-
-def _domain_from_url(url: str) -> str:
-    if not url:
-        return ""
-    m = re.search(r"https?://([^/]+)", url)
-    return m.group(1) if m else ""
-
 # ── Scan Phases ────────────────────────────────────────────────────────────────
 async def _phase_domains() -> list[dict]:
     state["phase"] = "domains"
@@ -794,15 +746,50 @@ async def _phase_domains() -> list[dict]:
         raise RuntimeError("No active domains found.")
     return active
 
-async def _phase_discover(
-    domains: list[dict],
-    seen_slugs: set[str],
-    dead_slugs: list[str],
-    sem: asyncio.Semaphore,
-) -> None:
+async def _phase_discover(domains: list[dict]) -> None:
     state["phase"] = "discovering"
+    sem        = asyncio.Semaphore(int(config.get("stream_concurrency", 10)))
+    seen_slugs: set[str] = set()   # global dedup across domains
+    dead_slugs: list[str] = []     # playlist slugs whose URLs are broken
 
-    # Build fallback slug list (used only if all auto-discovery stages fail)
+    # ── Step A: health-check the imported MOJ playlist against known-good domains ──
+    if config.get("slug_source", "both") in ("playlist", "both"):
+        slog("━━━ Checking imported MOJ playlist ━━━")
+        playlist_channels = await _load_playlist_channels()
+        if playlist_channels:
+            active_domains = {d["domain"] for d in domains}
+
+            async def _check_playlist_entry(ch: dict) -> None:
+                slug = ch["slug"]
+                url  = ch.get("url")
+                name = ch.get("name") or slug.replace("_", " ").title()
+                if not url:
+                    dead_slugs.append(slug)
+                    return
+                alive = await _verify_stream(url, sem)
+                if alive:
+                    if slug not in seen_slugs:
+                        seen_slugs.add(slug)
+                        state["results"][slug] = {
+                            "url":    url,
+                            "name":   name,
+                            "domain": _domain_from_url(url),
+                            "method": "imported",
+                        }
+                        state["stats"]["streams_verified"] += 1
+                        state["stats"]["streams_found"]    += 1
+                        state["progress"]                  += 1
+                else:
+                    dead_slugs.append(slug)
+
+            await asyncio.gather(*[_check_playlist_entry(ch) for ch in playlist_channels])
+            slog(
+                f"  Playlist: {len(seen_slugs)} alive (kept), "
+                f"{len(dead_slugs)} dead → queued for re-scan"
+            )
+            _broadcast({"type": "state", "data": state})
+
+    # ── Step B: build fallback slug list (dead playlist slugs + channels.txt) ──
     slog("━━━ Preparing fallback slug list ━━━")
     fallback_slugs = await _build_fallback_slugs(extra_slugs=dead_slugs)
     slog(f"  Fallback: {len(fallback_slugs)} slug(s) ready")
@@ -877,7 +864,7 @@ async def _phase_write() -> None:
     for slug, info in sorted(state["results"].items()):
         if not info.get("url"):
             continue
-        name   = info.get("name") or slug.replace("_", " ").title()
+        name   = _strip_moj(info.get("name") or slug.replace("_", " ").title())
         extinf = (
             f'#EXTINF:-1 tvg-id="{slug}" tvg-name="{name}" '
             f'group-title="MOJ",{name}'
@@ -911,11 +898,8 @@ async def run_cycle() -> None:
         _broadcast({"type": "state", "data": state})
 
         try:
-            sem        = asyncio.Semaphore(int(config.get("stream_concurrency", 10)))
-            seen_slugs: set[str] = set()
-            dead_slugs = await _phase_import_playlist(seen_slugs, sem)
-            domains    = await _phase_domains()
-            await _phase_discover(domains, seen_slugs, dead_slugs, sem)
+            domains = await _phase_domains()
+            await _phase_discover(domains)
             await _phase_write()
         except RuntimeError as exc:
             slog(str(exc), "error")
@@ -1001,11 +985,19 @@ async def api_post_channels(request: Request):
     return {"status": "ok", "count": len(lines)}
 
 @app.post("/api/run")
+@app.post("/api/scan/start")
 async def api_run():
     if state["running"]:
         raise HTTPException(409, "A scan cycle is already running.")
     asyncio.create_task(run_cycle())
     return {"status": "started"}
+
+@app.post("/api/scan/stop")
+async def api_scan_stop():
+    state["running"] = False
+    state["phase"]   = "idle"
+    _broadcast({"type": "state", "data": state})
+    return {"status": "stopped"}
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
