@@ -532,7 +532,7 @@ td.t-domain  { font-size: .68rem; color: var(--muted); }
         <div class="stat"><div class="stat-n c-blue"   id="stSlugs">0</div><div class="stat-l">Slugs</div></div>
         <div class="stat"><div class="stat-n c-green"  id="stFound">0</div><div class="stat-l">Found</div></div>
         <div class="stat"><div class="stat-n c-red"    id="stFailed">0</div><div class="stat-l">Failed</div></div>
-        <div class="stat"><div class="stat-n c-purple" id="stProbes">0</div><div class="stat-l">Probes</div></div>
+        <div class="stat"><div class="stat-n c-purple" id="stProbes">0</div><div class="stat-l">Healed</div></div>
       </div>
     </div>
 
@@ -738,10 +738,10 @@ function renderAll() {
   document.getElementById('nextCycle').textContent = s.nextCycleIn || '–';
 
   // Stats
-  document.getElementById('stSlugs').textContent  = stats.total_slugs ?? 0;
-  document.getElementById('stFound').textContent  = stats.found       ?? 0;
-  document.getElementById('stFailed').textContent = stats.failed      ?? 0;
-  document.getElementById('stProbes').textContent = formatNum(s.probes_fired ?? 0);
+  document.getElementById('stSlugs').textContent  = stats.streams_found    ?? Object.keys(s.results||{}).length;
+  document.getElementById('stFound').textContent  = stats.streams_verified ?? 0;
+  document.getElementById('stFailed').textContent = stats.streams_failed   ?? 0;
+  document.getElementById('stProbes').textContent = formatNum(s.stats && s.stats.streams_healed != null ? s.stats.streams_healed : 0);
 
   // Domains
   const domains = s.activeDomains || [];
@@ -763,10 +763,18 @@ function renderAll() {
 
   // Last cycle summary
   document.getElementById('lastCycle').textContent = s.lastCycleTime || '–';
-  document.getElementById('lastFound').textContent = stats.found  != null ? stats.found  : '–';
-  document.getElementById('lastSlugs').textContent = stats.total_slugs != null ? stats.total_slugs : '–';
+  document.getElementById('lastFound').textContent = (s.moj && s.moj.working  != null) ? s.moj.working  : (stats.streams_verified ?? '–');
+  document.getElementById('lastSlugs').textContent = (s.moj && s.moj.input    != null) ? s.moj.input    : (stats.streams_found   ?? '–');
 
   renderTable();
+  // Incremental log update (only new lines)
+  const logWrap = document.getElementById('logWrap');
+  const logLines = appState.scanLog || [];
+  const rendered = logWrap.querySelectorAll('.log-entry').length;
+  if (logLines.length < rendered) { logWrap.innerHTML = ''; }
+  for (let i = rendered; i < logLines.length; i++) {
+    appendLog(logLines[i]);
+  }
 }
 
 // ── Results Table ──────────────────────────────────────────────────────────────
@@ -827,13 +835,16 @@ function setFilter(f) {
 function appendLog(entry) {
   const wrap = document.getElementById('logWrap');
   wrap.querySelectorAll('.empty').forEach(e => e.remove());
-  const cls = /✓|found|complete/i.test(entry.msg) ? 'ok'
-            : /warn/i.test(entry.msg) ? 'warn'
-            : /error|fail/i.test(entry.msg) ? 'err'
+  // entry may be a plain string (from scanLog array) or {ts, msg}
+  const raw = typeof entry === 'string' ? entry : (entry.msg || String(entry));
+  const ts  = typeof entry === 'object' && entry.ts ? entry.ts : '';
+  const cls = /✓|found|complete|loaded/i.test(raw) ? 'ok'
+            : /warn|⚠/i.test(raw) ? 'warn'
+            : /error|fail|✗/i.test(raw) ? 'err'
             : '';
   const el = document.createElement('div');
   el.className = 'log-entry';
-  el.innerHTML = `<span class="log-ts">${esc(entry.ts)}</span><span class="log-msg ${cls}">${esc(entry.msg)}</span>`;
+  el.innerHTML = `<span class="log-ts">${esc(ts)}</span><span class="log-msg ${cls}">${esc(raw)}</span>`;
   wrap.appendChild(el);
   const all = wrap.querySelectorAll('.log-entry');
   if (all.length > 600) all[0].remove();
@@ -845,7 +856,9 @@ function renderLog() {
   const entries = appState.scanLog || [];
   if (!entries.length) return;
   wrap.innerHTML = '';
-  entries.forEach(appendLog);
+  entries.forEach(line => appendLog(line));
+  // auto-scroll
+  wrap.scrollTop = wrap.scrollHeight;
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -974,7 +987,7 @@ async function triggerRun() {
   btn.disabled = true;
   btn.textContent = '⏳ Starting…';
   try {
-    const r = await fetch('/api/run', { method: 'POST' });
+    const r = await fetch('/api/scan/start', { method: 'POST' });
     if (!r.ok) {
       const d = await r.json();
       alert(d.detail || 'Could not start scan.');

@@ -1,8 +1,11 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MOJFixxer — Docker Compose
 #
-#  Pulls the pre-built image from GitHub Container Registry.
-#  For a local build substitute the image line with:
+#  Pre-built image from GHCR:
+#    image: ghcr.io/n3o2345/mojfixxer:latest
+#
+#  OR build locally (recommended for TrueNAS — avoids GHCR pull):
+#    image: mojfixxer:local
 #    build: .
 #
 #  Dashboard : http://<host-ip>:9001/
@@ -12,7 +15,9 @@
 services:
   mojfixxer:
     container_name: mojfixxer
-    image: ghcr.io/n3o2345/mojfixxer}:latest
+    build: .
+    # Swap the above two lines to pull from GHCR instead:
+    # image: ghcr.io/n3o2345/mojfixxer:latest
 
     environment:
       PYTHONUNBUFFERED: "1"
@@ -22,9 +27,9 @@ services:
       - "${HOST_PORT:-9001}:8080"
 
     volumes:
-      # Persistent data: config, playlist output, logs. Edit this to your data path.
-      # channels.txt and config.json are seeded from defaults on first run.
-      - mojfixxer-data:/app
+      # TrueNAS Scale: use a host path so data survives app removal.
+      # Change /mnt/pool/mojfixxer/data to your actual dataset path.
+      - ${DATA_PATH:-./data-volume}:/app
 
     restart: unless-stopped
 
@@ -40,6 +45,3 @@ services:
       timeout: 10s
       start_period: 20s
       retries: 3
-
-volumes:
-  mojfixxer-data:
