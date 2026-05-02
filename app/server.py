@@ -240,7 +240,9 @@ async def probe_slugs_on_domain(session, domain: str, channels: list) -> dict:
     found    = {}
 
     async def probe(channel: str, pattern: str):
-        slug = normalize(channel)
+        # Strip the "(MOJ)" provenance tag before normalizing so that
+        # "ESPN (MOJ)" → slug "espn", not "espnmoj".
+        slug = normalize(re.sub(r"\s*\(MOJ\)\s*", "", channel, flags=re.IGNORECASE))
         url  = f"https://{domain}{pattern.replace('{slug}', slug)}"
         async with sem:
             try:
@@ -344,14 +346,20 @@ async def run_scan():
 
                 for i in range(0, len(items), batch):
                     chunk = items[i:i + batch]
-                    oks   = await asyncio.gather(*[probe_url(info["url"]) for _, info in chunk if info["url"]])
 
-                    for j, (ch_name, info) in enumerate(chunk):
+                    # Only probe items that actually have a URL; track their
+                    # names separately so we can zip results back correctly.
+                    probed_names = [ch for ch, info in chunk if info["url"]]
+                    probe_tasks  = [probe_url(results[ch]["url"]) for ch in probed_names]
+                    probe_results = await asyncio.gather(*probe_tasks)
+                    ok_map = dict(zip(probed_names, probe_results))
+
+                    for ch_name, info in chunk:
                         if not info["url"]:
                             results[ch_name]["status"] = "no_url"
                             dead_channels.append(ch_name)
                             state["stats"]["streams_failed"] += 1
-                        elif oks[j]:
+                        elif ok_map[ch_name]:
                             results[ch_name]["status"] = "verified"
                             state["stats"]["streams_verified"] += 1
                         else:
@@ -368,6 +376,29 @@ async def run_scan():
                      f"{len(dead_channels)} dead/missing")
 
                 # ── Phase 3: Domain discovery (only if there are dead streams) ──
+                # Also pull in channels.txt entries as additional heal candidates
+                # when slug_source is "both" or "channels".
+                slug_source = config.get("slug_source", "both")
+                if slug_source in ("both", "channels"):
+                    channels_file = DATA_DIR / "channels.txt"
+                    if channels_file.exists():
+                        extra = [
+                            l.strip() for l in channels_file.read_text().splitlines()
+                            if l.strip() and not l.startswith("#")
+                        ]
+                        # Add any channels.txt entry not already tracked in results
+                        for ch in extra:
+                            if ch not in results:
+                                results[ch] = {
+                                    "url":    None,
+                                    "domain": "",
+                                    "status": "no_url",
+                                    "method": "channels_txt",
+                                }
+                                dead_channels.append(ch)
+                                state["stats"]["streams_failed"] += 1
+                        if extra:
+                            slog(f"added {len(extra)} channels.txt entries to heal candidates")
                 if dead_channels:
                     slog(f"phase 3: {len(dead_channels)} streams need new URLs — scanning domains")
                     state["phase"]    = "discovering"
