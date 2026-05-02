@@ -202,39 +202,97 @@ async def load_moj_channels() -> dict:
     return moj
 
 # ── DOMAIN DISCOVERY ──────────────────────────────────────────────────────────
+
+# Named subdomains to always probe in addition to fl{N}.moveonjoy.com
+_NAMED_SUBDOMAINS = [
+    "live", "stream", "cdn", "us1", "us2", "us3",
+    "eu1", "eu2", "ca1", "uk1", "ny1", "la1",
+    "tv", "hd", "iptv", "media", "play", "vod",
+]
+
 async def discover_active_domains(session) -> list:
-    min_fl = config.get("min_fl", 2)
-    max_fl = config.get("max_fl", 200)
-    sem    = asyncio.Semaphore(config.get("domain_concurrency", 50))
+    min_fl = config.get("min_fl", 1)
+    max_fl = config.get("max_fl", 999)
+    concurrency = config.get("domain_concurrency", 50)
+    sem    = asyncio.Semaphore(concurrency)
     active = []
 
-    async def check(fl: int):
-        domain  = f"fl{fl}.moveonjoy.com"
-        timeout = aiohttp.ClientTimeout(total=config.get("domain_timeout", 5))
+    async def check(domain: str):
+        timeout = aiohttp.ClientTimeout(total=config.get("domain_timeout", 8))
         async with sem:
             try:
-                async with session.get(f"https://{domain}/", timeout=timeout, allow_redirects=True) as r:
+                async with session.get(f"https://{domain}/", timeout=timeout,
+                                       allow_redirects=True) as r:
                     if r.status < 500:
                         active.append(domain)
             except Exception:
                 pass
 
-    slog(f"probing fl{min_fl} to fl{max_fl}.moveonjoy.com …")
-    tasks = [asyncio.create_task(check(fl)) for fl in range(min_fl, max_fl + 1)]
-    chunk = 30
-    for i in range(0, len(tasks), chunk):
-        await asyncio.gather(*tasks[i:i + chunk])
+    numbered = [f"fl{fl}.moveonjoy.com" for fl in range(min_fl, max_fl + 1)]
+    named    = [f"{sub}.moveonjoy.com"  for sub in _NAMED_SUBDOMAINS]
+    all_hosts = named + numbered   # named first — few hosts, answer fast
+
+    total = len(all_hosts)
+    slog(f"probing {len(named)} named + fl{min_fl}–fl{max_fl} ({total} total) …")
+
+    # Feed hosts through the semaphore in batches equal to concurrency so the
+    # semaphore actually throttles properly and no domain gets silently dropped
+    # due to pre-scheduled tasks racing before the gather resolves.
+    for i in range(0, total, concurrency):
+        batch = all_hosts[i:i + concurrency]
+        await asyncio.gather(*[check(d) for d in batch])
         state["activeDomains"] = sorted(active)
-        state["progress"]      = i + chunk
+        state["progress"]      = i + len(batch)
         await push_state()
 
     slog(f"found {len(active)} active domains")
     return sorted(active)
 
 # ── SLUG PROBE ON A SINGLE DOMAIN ─────────────────────────────────────────────
-async def probe_slugs_on_domain(session, domain: str, channels: list) -> dict:
+def _infer_path_patterns(results: dict) -> list:
+    """
+    Look at verified/healed URLs and extract their path pattern (replacing the
+    slug with {slug}).  Returns a deduplicated list of patterns ordered by
+    frequency, so the most common real-world pattern is tried first.
+    """
+    from urllib.parse import urlparse
+    from collections import Counter
+    counts = Counter()
+    for info in results.values():
+        url = info.get("url")
+        if not url or info.get("status") not in ("verified", "healed"):
+            continue
+        try:
+            path = urlparse(url).path          # e.g. /espn/index.m3u8
+            parts = path.strip("/").split("/") # ['espn', 'index.m3u8']
+            # Replace the slug segment (first segment that isn't a fixed keyword)
+            keywords = {"live", "stream", "hls", "vod", "play", "media"}
+            rebuilt = []
+            replaced = False
+            for part in parts:
+                if not replaced and part and part.lower() not in keywords:
+                    rebuilt.append("{slug}")
+                    replaced = True
+                else:
+                    rebuilt.append(part)
+            pattern = "/" + "/".join(rebuilt)
+            counts[pattern] += 1
+        except Exception:
+            pass
+    # Return most-common first, then fall back to configured patterns
+    return [p for p, _ in counts.most_common()]
+
+async def probe_slugs_on_domain(session, domain: str, channels: list,
+                                 learned_patterns: list | None = None) -> dict:
     """Try path patterns for each channel name on one domain. Returns {name: url}."""
-    patterns = config.get("path_patterns", ["/{slug}/index.m3u8"])
+    configured = config.get("path_patterns", ["/{slug}/index.m3u8"])
+    # Learned patterns go first (most likely to match); configured patterns as fallback
+    if learned_patterns:
+        seen = set(learned_patterns)
+        patterns = learned_patterns + [p for p in configured if p not in seen]
+    else:
+        patterns = configured
+
     timeout  = aiohttp.ClientTimeout(total=config.get("stream_timeout", 10))
     sem      = asyncio.Semaphore(config.get("stream_concurrency", 15))
     found    = {}
@@ -248,8 +306,13 @@ async def probe_slugs_on_domain(session, domain: str, channels: list) -> dict:
             try:
                 async with session.get(url, timeout=timeout) as r:
                     if r.status == 200:
-                        ct = r.headers.get("Content-Type", "")
-                        if "mpegurl" in ct or "octet" in ct or url.endswith((".m3u8", ".m3u", ".ts")):
+                        ct = r.headers.get("Content-Type", "").lower()
+                        # Accept anything that isn't HTML/JSON/XML — CDN servers
+                        # often return text/plain or application/octet-stream for
+                        # HLS manifests, and video/mp2t for TS streams.
+                        is_html = any(x in ct for x in ("text/html", "application/json",
+                                                         "text/xml", "application/xml"))
+                        if not is_html:
                             return channel, url
             except Exception:
                 pass
@@ -414,6 +477,14 @@ async def run_scan():
                         slog("no active moveonjoy.com domains found — cannot heal dead streams")
                     else:
                         # ── Phase 4: Re-scan dead channels across all domains ──
+                        # Learn path patterns from the verified URLs we already have
+                        learned = _infer_path_patterns(results)
+                        if learned:
+                            slog(f"learned {len(learned)} path pattern(s) from verified URLs: "
+                                 + ", ".join(learned[:3]))
+                        else:
+                            slog("no verified URLs to learn patterns from — using configured patterns")
+
                         slog(f"phase 4: re-scanning {len(dead_channels)} dead channels across "
                              f"{len(domains)} domains")
                         state["phase"]    = "scanning"
@@ -428,7 +499,8 @@ async def run_scan():
                                 slog("all dead streams healed — stopping domain sweep early")
                                 break
 
-                            found = await probe_slugs_on_domain(session, domain, still_dead)
+                            found = await probe_slugs_on_domain(session, domain, still_dead,
+                                                                 learned_patterns=learned)
                             for ch_name, url in found.items():
                                 slog(f"  healed: {ch_name}  →  {url}")
                                 results[ch_name] = {
