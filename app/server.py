@@ -621,8 +621,8 @@ async def _brute_force_domain(
 # ── m3u8 Scraper ─────────────────────────────────────────────────────────────────
 # Match anything containing .m3u8 — absolute or relative, any path structure.
 
-_M3U8_ABS_RE = re.compile(r'https?://[^\s"\'<>]*\.m3u8[^\s"\'<>]*', re.IGNORECASE)
-_M3U8_REL_RE = re.compile(r'(/[^\s"\'<>]*\.m3u8[^\s"\'<>]*)',        re.IGNORECASE)
+_M3U8_ABS_RE = re.compile(r'https?://[^\s"\'<>]*/index\.m3u8', re.IGNORECASE)
+_M3U8_REL_RE = re.compile(r'(/[^\s"\'<>]*/index\.m3u8)',      re.IGNORECASE)
 
 
 async def _discover_playlist(base_url: str) -> list[dict]:
