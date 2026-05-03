@@ -1,0 +1,37 @@
+#EXTM3U
+#EXTINF:-1 tvg-id="10051.270BET.tvapp2" tvg-name="BET (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/bet-us.png" group-title="Entertainment",BET (MOJ)
+http://fl51.moveonjoy.com/BET/index.m3u8
+#EXTINF:-1 tvg-id="71799.605BLOOMHD.tvapp2" tvg-name="Bloomberg (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/bloomberg-live-events-us.png" group-title="News",Bloomberg (MOJ)
+http://fl51.moveonjoy.com/BLOOMBERG/index.m3u8
+#EXTINF:-1 tvg-id="73067.82BOUNCE.tvapp2" tvg-name="Bounce (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/bounce-us.png" group-title="Entertainment",Bounce (MOJ)
+http://fl51.moveonjoy.com/BOUNCE_TV/index.m3u8
+#EXTINF:-1 tvg-id="18544.230MAGN.tvapp2" tvg-name="Magnolia (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/magnolia-network-us.png" group-title="Entertainment",Magnolia (MOJ)
+http://fl51.moveonjoy.com/DIY/index.m3u8
+#EXTINF:-1 tvg-id="32281.216NBATV.tvapp2" tvg-name="NBA Network (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/nba-tv-us.png" group-title="Sports",NBA Network (MOJ)
+http://fl51.moveonjoy.com/NBA_TV/index.m3u8
+#EXTINF:-1 tvg-id="30420.302NIKTON.tvapp2" tvg-name="Nicktoons (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/nick-toons-us.png" group-title="Kids",Nicktoons (MOJ)
+http://fl51.moveonjoy.com/NICKTOONS/index.m3u8
+#EXTINF:-1 tvg-id="11069.150QVC.tvapp2" tvg-name="QVC (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/qvc-us.png" group-title="Entertainment",QVC (MOJ)
+http://fl51.moveonjoy.com/QVC/index.m3u8
+#EXTINF:-1 tvg-id="52199.238REELZ.tvapp2" tvg-name="ReelzChannel (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/reelz-us.png" group-title="Entertainment",ReelzChannel (MOJ)
+http://fl51.moveonjoy.com/REELZ/index.m3u8
+#EXTINF:-1 tvg-id="49603.77SNY.tvapp2" tvg-name="SNY SportsNet (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/sny-us.png" group-title="Sports",SNY SportsNet (MOJ)
+http://fl51.moveonjoy.com/SNY/index.m3u8
+#EXTINF:-1 tvg-id="33930.605SPRTMAN.tvapp2" tvg-name="Sportsman (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/sportsman-channel-us.png" group-title="Sports",Sportsman (MOJ)
+http://fl51.moveonjoy.com/SPORTSMAN_CHANNEL/index.m3u8
+#EXTINF:-1 tvg-id="12719.525STARZ.tvapp2" tvg-name="STARZ (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/starz-us.png" group-title="Premium",STARZ (MOJ)
+http://fl51.moveonjoy.com/STARZ/index.m3u8
+#EXTINF:-1 tvg-id="57569.528STZCHD.tvapp2" tvg-name="STARZ Comedy (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/starz-comedy-us.png" group-title="Premium",STARZ Comedy (MOJ)
+http://fl51.moveonjoy.com/STARZ_COMEDY/index.m3u8
+#EXTINF:-1 tvg-id="16311.529STZE.tvapp2" tvg-name="STARZ Edge (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/starz-edge-us.png" group-title="Premium",STARZ Edge (MOJ)
+http://fl51.moveonjoy.com/STARZ_EDGE/index.m3u8
+#EXTINF:-1 tvg-id="14871.541STZENAC.tvapp2" tvg-name="STARZ Encore Action (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/starz-encore-action-us.png" group-title="Premium",STARZ Encore Action (MOJ)
+http://fl51.moveonjoy.com/STARZ_ENCORE_ACTION/index.m3u8
+#EXTINF:-1 tvg-id="16311.529STZE.tvapp2" tvg-name="STARZ Encore Classic (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/starz-encore-classic-us.png" group-title="Premium",STARZ Encore Classic (MOJ)
+http://fl51.moveonjoy.com/STARZ_ENCORE_CLASSIC/index.m3u8
+#EXTINF:-1 tvg-id="12719.525STARZ.tvapp2" tvg-name="STARZ West (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/starz-encore-westerns-us.png" group-title="Premium",STARZ West (MOJ)
+http://fl51.moveonjoy.com/STARZ_WEST/index.m3u8
+#EXTINF:-1 tvg-id="11867.247TBS.tvapp2" tvg-name="TBS (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/tbs-us.png" group-title="Entertainment",TBS (MOJ)
+http://fl51.moveonjoy.com/TBS/index.m3u8
+#EXTINF:-1 tvg-id="75176.464TUDNU.tvapp2" tvg-name="TUDN (MOJ)" tvg-logo="https://epg.binaryninja.net/XMLTV-EPG/resources/tv-logos/countries/united-states/tudn-us.png" group-title="Entertainment",TUDN (MOJ)
+http://fl51.moveonjoy.com/TUDN/index.m3u8

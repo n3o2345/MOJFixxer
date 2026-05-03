@@ -1,6 +1,6 @@
 {
-  "min_fl": 1,
-  "max_fl": 999,
+  "min_fl": 2,
+  "max_fl": 200,
   "healthcheck_enabled": true,
   "healthcheck_interval": 86400,
   "healthcheck_batch": 5,
@@ -20,11 +20,7 @@
     "/live/{slug}/index.ts",
     "/stream/{slug}/index.m3u8",
     "/stream/{slug}.m3u8",
-    "/{slug}/index.m3u",
-    "/hls/{slug}/index.m3u8",
-    "/hls/{slug}.m3u8",
-    "/{slug}/chunklist.m3u8",
-    "/play/{slug}/index.m3u8"
+    "/{slug}/index.m3u"
   ],
   "scan_interval": 14400,
   "auto_cycle": true

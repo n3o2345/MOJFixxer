@@ -1,20 +1,34 @@
 """
 MOJ Discovery — server.py
 
-Stream discovery pipeline (per active domain):
+Stream discovery pipeline (per active domain, in order):
 
-  1 — WILDCARD M3U SCAN  (https then http)
-    Try a broad list of well-known M3U endpoints (all.m3u8, playlist.m3u8,
-    get.php, player_api.php, etc.).  Every #EXTINF + URL pair is collected
-    regardless of channel name — no slug list required.  One hit captures
-    every variant automatically ("Starz", "Starz Movies", "Starz East", …).
+  Stage 1 — DIRECTORY LISTING
+    GET /  →  if Nginx/Apache autoindex HTML returned, parse <a href="SLUG/"> links.
+    Gives exact channel slugs with zero wasted probes. One request per domain.
 
-  2 — SLUG BRUTE-FORCE  (fallback only)
-    Used only when the wildcard scan yields nothing.
-    Pulls slugs from channels.txt and/or remote playlist URL,
-    tries each path pattern per slug until first hit wins.
+  Stage 2 — MASTER PLAYLIST
+    Try common playlist endpoints: /playlist.m3u8, /playlist.m3u, /all.m3u8,
+    /channels.m3u8, /index.m3u8, /index.m3u
+    Parse #EXTINF + URL pairs from any M3U/M3U8 response.
+    URLs are used directly — no slug guessing required.
 
-All discovered URLs are verified with ffprobe before inclusion.
+  Stage 3 — HLS MASTER MANIFEST
+    Servers that expose a top-level #EXT-X-STREAM-INF manifest at /
+    list sub-stream paths directly. Parse and collect.
+
+  Stage 4 — XTREAM CODES API (anonymous)
+    Try /get.php (no credentials) → may return a full M3U playlist.
+    Try /player_api.php?action=get_live_streams → may return JSON stream list.
+
+  Stage 5 — SLUG BRUTE-FORCE (fallback only)
+    Used only when stages 1-4 yield nothing from a domain.
+    Pulls slugs from channels.txt and/or remote playlist URL.
+    Tries each path pattern sequentially per slug — first hit wins.
+
+All discovered stream URLs are verified with ffprobe before inclusion.
+ffprobe validates actual decodability (HLS, MPEG-TS, RTMP, plain HTTP)
+rather than just TCP reachability.
 """
 
 import os
@@ -80,44 +94,28 @@ DEFAULT_CONFIG: dict = {
     "playlist_url":       "",
     "path_patterns": [
         "/{slug}/index.m3u8",
-        "/{slug}/index.m3u",
+        "/{slug}/index.ts",
         "/{slug}.m3u8",
+        "/{slug}.ts",
+        "/live/{slug}/index.m3u8",
+        "/live/{slug}/index.ts",
+        "/stream/{slug}/index.m3u8",
+        "/stream/{slug}.m3u8",
     ],
 }
 
-# Wildcard M3U scan paths — tried in order, https then http, per domain.
-# The first path that returns valid M3U/JSON wins; all channels inside
-# are collected automatically with no slug list needed.
+# Playlist endpoints tried during master-playlist discovery (Stage 2)
 _PLAYLIST_PATHS = [
-    # Broad "give me everything" endpoints
-    "/get.php",                                   # Xtream Codes no-auth
-    "/all.m3u8",
-    "/all.m3u",
     "/playlist.m3u8",
     "/playlist.m3u",
+    "/all.m3u8",
+    "/all.m3u",
     "/channels.m3u8",
     "/channels.m3u",
-    "/live.m3u8",
-    "/live.m3u",
     "/index.m3u8",
     "/index.m3u",
-    # Sub-path variants
     "/live/index.m3u8",
-    "/live/playlist.m3u8",
-    "/live/all.m3u8",
-    "/stream/index.m3u8",
-    "/stream/playlist.m3u8",
-    "/streams.m3u8",
-    "/streams.m3u",
-    "/feed.m3u8",
-    "/output.m3u8",
-    "/list.m3u8",
-    "/list.m3u",
-    # Xtream / panel API variants
-    "/player_api.php?action=get_live_streams",
-    "/get.php?type=m3u_plus",
-    "/get.php?output=m3u8",
-    "/get.php?output=ts",
+    "/get.php",         # Xtream no-auth (Stage 4 folded in)
 ]
 
 def load_config() -> dict:
@@ -190,6 +188,12 @@ _UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/122.0.0.0 Safari/537.36"
 )
+
+# Extensions we consider valid stream files
+_STREAM_EXTS = {
+    ".m3u8", ".m3u", ".ts", ".mp4", ".mpd",
+    ".flv",  ".avi", ".mkv", ".mov",
+}
 
 # ── Generic subprocess runner ──────────────────────────────────────────────────
 async def _run(
@@ -275,10 +279,55 @@ def normalize_slug(raw: str) -> str:
     s = re.sub(r"_+", "_", s)
     return s.strip("_")
 
-
 # ── Parsers ────────────────────────────────────────────────────────────────────
 def _is_m3u(text: str) -> bool:
     return "#EXTM3U" in text or "#EXTINF" in text or "#EXT-X-STREAM-INF" in text
+
+def _has_stream_ext(path: str) -> bool:
+    ext = os.path.splitext(path.split("?")[0].lower())[1]
+    return ext in _STREAM_EXTS
+
+def parse_directory_listing(html: str, base_url: str) -> list[dict]:
+    """
+    Parse Nginx/Apache autoindex HTML.
+    Returns list of {slug, url, name, ext} for all entries that look like
+    stream directories or stream files.
+    """
+    results = []
+    seen    = set()
+
+    # Directories: <a href="SLUG/">  →  probe SLUG/index.m3u8 etc.
+    for slug in re.findall(r'href="([A-Za-z0-9_\-\.]+)/"', html):
+        upper = slug.upper()
+        if upper in {"STATIC", "ASSETS", "JS", "CSS", "IMG", "IMAGES", "FONTS", "MEDIA"}:
+            continue
+        if upper not in seen:
+            seen.add(upper)
+            # We have the directory but not the final stream file yet;
+            # record it and we'll discover the file extension during verification.
+            results.append({
+                "slug":   upper,
+                "name":   upper.replace("_", " ").title(),
+                "dir_url": base_url.rstrip("/") + f"/{slug}",
+                "url":    None,   # resolved during verification
+                "method": "directory",
+            })
+
+    # Stream files directly in root: <a href="CHANNEL.m3u8">
+    for href in re.findall(r'href="([A-Za-z0-9_\-\.]+)"', html):
+        if _has_stream_ext(href):
+            slug = normalize_slug(os.path.splitext(href)[0])
+            if slug not in seen:
+                seen.add(slug)
+                results.append({
+                    "slug":   slug,
+                    "name":   slug.replace("_", " ").title(),
+                    "dir_url": None,
+                    "url":    base_url.rstrip("/") + f"/{href}",
+                    "method": "directory",
+                })
+
+    return results
 
 def parse_m3u_content(text: str, base_url: str) -> list[dict]:
     """
@@ -342,10 +391,8 @@ def parse_m3u_content(text: str, base_url: str) -> list[dict]:
                     i = j
                     break
 
-        # Bare URL line (no #EXTINF header) — accept any recognised stream extension
-        elif line.startswith("http") and os.path.splitext(line.split("?")[0].lower())[1] in {
-            ".m3u8", ".m3u", ".ts", ".mp4", ".mpd", ".flv", ".avi", ".mkv", ".mov",
-        }:
+        # Bare URL line (no #EXTINF header)
+        elif line.startswith("http") and _has_stream_ext(line.split("?")[0]):
             slug = _slug_from_url(line)
             if slug and slug not in seen:
                 seen.add(slug)
@@ -409,15 +456,9 @@ def _slug_from_url(url: str) -> str | None:
     return None
 
 # ── Domain Reachability ────────────────────────────────────────────────────────
-async def _check_domain(fl: int, sem: asyncio.Semaphore) -> list[dict]:
-    """
-    Check both https and http for a domain.
-    Returns a list of {domain, scheme} — one entry per responsive scheme.
-    Both are kept because a domain may serve streams on one scheme only.
-    """
+async def _check_domain(fl: int, sem: asyncio.Semaphore) -> dict | None:
     domain  = f"fl{fl}.moveonjoy.com"
     timeout = int(config.get("domain_timeout", 5))
-    found   = []
     async with sem:
         for scheme in ("https", "http"):
             rc, code = await _run(
@@ -432,8 +473,47 @@ async def _check_domain(fl: int, sem: asyncio.Semaphore) -> list[dict]:
                 timeout=timeout + 3,
             )
             if code.strip() in {"200", "301", "302", "403", "404"}:
-                found.append({"domain": domain, "scheme": scheme})
-    return found
+                return {"domain": domain, "scheme": scheme}
+    return None
+
+# ── Stage 1: Directory Listing ─────────────────────────────────────────────────
+async def _discover_directory(base_url: str) -> list[dict]:
+    """GET / and parse Nginx/Apache autoindex HTML."""
+    status, body = await _fetch(base_url + "/", timeout=8)
+    if status not in {200, 403} or not body:
+        return []
+    # Must look like HTML directory listing
+    if "<a href=" not in body.lower():
+        return []
+    results = parse_directory_listing(body, base_url)
+    return results
+
+# ── Stage 2 & 4: Master Playlist / Xtream ─────────────────────────────────────
+async def _discover_playlist(base_url: str) -> list[dict]:
+    """
+    Try each playlist endpoint in turn.
+    Returns parsed stream list from the first endpoint that responds with
+    valid M3U content or Xtream JSON.
+    """
+    for path in _PLAYLIST_PATHS:
+        url            = base_url.rstrip("/") + path
+        status, body   = await _fetch(url, timeout=10)
+        if status not in {200} or not body or len(body) < 20:
+            continue
+
+        # Try M3U parse
+        if _is_m3u(body):
+            results = parse_m3u_content(body, base_url)
+            if results:
+                return results
+
+        # Try Xtream JSON
+        if body.lstrip().startswith("[") or body.lstrip().startswith("{"):
+            results = parse_xtream_json(body, base_url)
+            if results:
+                return results
+
+    return []
 
 # ── Stage 5: Slug Brute-Force (fallback) ──────────────────────────────────────
 def _slugs_from_txt(path: str) -> list[str]:
@@ -461,130 +541,147 @@ def _slugs_from_m3u_text(content: str) -> list[str]:
             slugs.add(s)
     return list(slugs)
 
+async def _build_fallback_slugs() -> list[str]:
+    source = config.get("slug_source", "both")
+    seen:  set[str]  = set()
+    slugs: list[str] = []
 
-def _domain_from_url(url: str) -> str:
-    if not url:
-        return ""
-    m = re.search(r"https?://([^/:]+)", url)
-    return m.group(1) if m else ""
+    def _add(new: list[str], label: str) -> None:
+        added = sum(1 for s in new if s and s not in seen and not seen.add(s) and slugs.append(s) is None)  # noqa
+        slog(f"  {label}: +{added} slug(s)  (total {len(slugs)})")
 
-def _strip_moj(name: str) -> str:
-    """Remove (MOJ), (MOJ-R), and similar provenance tags from a channel name."""
-    return re.sub(r"\s*\(MOJ[^)]*\)\s*", "", name, flags=re.IGNORECASE).strip()
+    if source in ("channels", "both"):
+        _add(_slugs_from_txt(CHANNELS_FILE), "channels.txt")
 
+    if source in ("playlist", "both"):
+        url = config.get("playlist_url", "").strip()
+        if url:
+            rc, body = await _run(
+                "curl", "-L", "-k", "-s", "-f", "-A", _UA,
+                "--max-time", "30", url,
+                timeout=35, capture_stdout=True,
+            )
+            if rc == 0 and body:
+                _add(_slugs_from_m3u_text(body), "remote playlist")
+            else:
+                slog(f"  Remote playlist fetch failed (exit {rc})", "warning")
 
-async def _load_playlist_channels() -> list[dict]:
-    """
-    Fetch the remote playlist URL and return {slug, name, url} for every entry.
-    Names have (MOJ)/(MOJ-R) stripped.  Returns [] if not configured or fetch fails.
-    """
-    url = config.get("playlist_url", "").strip()
-    if not url:
-        return []
-    rc, body = await _run(
-        "curl", "-L", "-k", "-s", "-f", "-A", _UA,
-        "--max-time", "30", url,
-        timeout=35, capture_stdout=True,
-    )
-    if rc != 0 or not body:
-        slog(f"  Remote playlist fetch failed (exit {rc})", "warning")
-        return []
-    channels = parse_m3u_content(body, "")   # URLs are absolute
-    # Strip (MOJ) tags from names
-    for ch in channels:
-        ch["name"] = _strip_moj(ch["name"])
-    slog(f"  Remote playlist: {len(channels)} channel(s) parsed")
-    return channels
+    return sorted(set(slugs))
 
+async def _brute_force_domain(
+    base_url: str,
+    slugs: list[str],
+    sem: asyncio.Semaphore,
+) -> list[dict]:
+    """Try each slug × pattern sequentially, return found streams."""
+    patterns = config.get("path_patterns", DEFAULT_CONFIG["path_patterns"])
+    found    = []
 
+    async def _try_slug(slug: str) -> dict | None:
+        for pattern in patterns:
+            url = base_url.rstrip("/") + pattern.replace("{slug}", slug)
+            ok  = await _verify_stream(url, sem)
+            if ok:
+                return {
+                    "slug":   slug,
+                    "name":   slug.replace("_", " ").title(),
+                    "url":    url,
+                    "method": "brute",
+                }
+        return None
 
-# ── m3u8 Scraper ─────────────────────────────────────────────────────────────────
-# Match anything containing .m3u8 — absolute or relative, any path structure.
-
-_M3U8_ABS_RE = re.compile(r'https?://[^\s"\'<>]*/index\.m3u8', re.IGNORECASE)
-_M3U8_REL_RE = re.compile(r'(/[^\s"\'<>]*/index\.m3u8)',      re.IGNORECASE)
-
-
-async def _discover_playlist(base_url: str) -> list[dict]:
-    """
-    Fetch the server root (and fallback paths), collect every URL containing
-    .m3u8 found anywhere in the response — absolute or relative, any structure.
-    Returns a stream entry for each unique URL found.
-    """
-    found:   list[dict] = []
-    seen:    set[str]   = set()
-    visited: set[str]   = set()
-
-    def _name(url: str) -> str:
-        # Best-effort display name from the URL path
-        parts = [p for p in url.split("?")[0].rstrip("/").split("/") if p]
-        return parts[-2].replace("_", " ").replace("-", " ").title() if len(parts) >= 2 else parts[-1] if parts else url
-
-    def _scrape(body: str) -> None:
-        for m in _M3U8_ABS_RE.finditer(body):
-            url = m.group(0).strip().rstrip("\"',>")
-            if url not in seen:
-                seen.add(url)
-                found.append({"url": url, "name": _name(url), "method": "m3u8_scan"})
-        for m in _M3U8_REL_RE.finditer(body):
-            url = (base_url.rstrip("/") + m.group(1)).strip().rstrip("\"',>")
-            if url not in seen:
-                seen.add(url)
-                found.append({"url": url, "name": _name(url), "method": "m3u8_scan"})
-
-    for path in ["/"] + _PLAYLIST_PATHS:
-        url = base_url.rstrip("/") + path
-        if url in visited:
-            continue
-        visited.add(url)
-
-        status, body = await _fetch(url, timeout=10)
-        if status != 200 or not body or len(body) < 10:
-            continue
-
-        _scrape(body)
-
-        # Also parse if body is a proper M3U (catches #EXTINF entries)
-        if _is_m3u(body):
-            for s in parse_m3u_content(body, base_url):
-                if s["url"] not in seen:
-                    seen.add(s["url"])
-                    found.append({"url": s["url"], "name": s["name"], "method": "m3u"})
-
-        if found:
-            break
-
+    tasks   = [_try_slug(s) for s in slugs]
+    results = await asyncio.gather(*tasks)
+    found   = [r for r in results if r]
     return found
+
 # ── Per-Domain Discovery ───────────────────────────────────────────────────────
 async def _discover_domain(
     domain: str,
     scheme: str,
+    fallback_slugs: list[str],
     sem: asyncio.Semaphore,
 ) -> tuple[list[dict], str]:
     """
-    Fetch the server root on https then http, scrape every */index.m3u8 found.
-    That's it — no brute-force, no slug guessing.
+    Run the full discovery pipeline for one domain.
+    Returns (stream_list, method_used).
+    Streams have keys: slug, name, url (may be None for dir entries), method.
     """
-    for s in ("https", "http"):
-        base_url = f"{s}://{domain}"
-        streams  = await _discover_playlist(base_url)
+    base_url = f"{scheme}://{domain}"
+
+    # Stage 1 — Directory listing
+    slog(f"  [{domain}] Stage 1: directory listing …")
+    streams = await _discover_directory(base_url)
+    if streams:
+        slog(f"  [{domain}] Directory listing → {len(streams)} entr(ies)")
+        return streams, "directory"
+
+    # Stage 2/4 — Master playlist / Xtream
+    slog(f"  [{domain}] Stage 2: master playlist / Xtream …")
+    streams = await _discover_playlist(base_url)
+    if streams:
+        slog(f"  [{domain}] Playlist → {len(streams)} stream(s)")
+        return streams, "playlist"
+
+    # Stage 5 — Brute-force fallback
+    if fallback_slugs:
+        slog(f"  [{domain}] Stage 5: brute-force {len(fallback_slugs)} slug(s) …")
+        streams = await _brute_force_domain(base_url, fallback_slugs, sem)
         if streams:
-            slog(f"  [{domain}] Found {len(streams)} stream(s) via {s}")
-            return streams, "playlist"
+            slog(f"  [{domain}] Brute-force → {len(streams)} hit(s)")
+        return streams, "brute"
 
     return [], "none"
+
+# ── Resolve Directory Entries ──────────────────────────────────────────────────
+async def _resolve_dir_entry(
+    entry: dict,
+    sem: asyncio.Semaphore,
+) -> dict | None:
+    """
+    For directory-listing entries we have the directory URL but not the
+    exact stream file.  Try common file names inside the directory.
+    """
+    if entry.get("url"):
+        # Already have a direct URL (file in root listing)
+        if await _verify_stream(entry["url"], sem):
+            return entry
+        return None
+
+    dir_url  = entry["dir_url"]
+    patterns = [
+        "/index.m3u8",
+        "/index.ts",
+        "/index.m3u",
+        "/stream.m3u8",
+        "/stream.ts",
+        "/live.m3u8",
+    ]
+    for pat in patterns:
+        url = dir_url.rstrip("/") + pat
+        if await _verify_stream(url, sem):
+            return {**entry, "url": url}
+    return None
 
 # ── Verify Discovered Streams ──────────────────────────────────────────────────
 async def _verify_all(
     streams: list[dict],
+    method: str,
     sem: asyncio.Semaphore,
 ) -> list[dict]:
-    """Verify all discovered stream URLs with ffprobe."""
+    """
+    Verify all discovered stream URLs with ffprobe.
+    Directory entries without a URL are resolved first.
+    """
     verified = []
 
     async def _check(entry: dict) -> dict | None:
-        if await _verify_stream(entry["url"], sem):
-            return entry
+        if method == "directory" and entry.get("url") is None:
+            resolved = await _resolve_dir_entry(entry, sem)
+            return resolved
+        else:
+            if await _verify_stream(entry["url"], sem):
+                return entry
         return None
 
     results = await asyncio.gather(*[_check(e) for e in streams])
@@ -597,19 +694,10 @@ async def _phase_domains() -> list[dict]:
     mn, mx = int(config["min_fl"]), int(config["max_fl"])
     slog(f"━━━ Domain sweep fl{mn}–fl{mx} ({mx - mn + 1} hosts) ━━━")
     sem = asyncio.Semaphore(int(config.get("domain_concurrency", 40)))
-    raw_lists = await asyncio.gather(*[_check_domain(fl, sem) for fl in range(mn, mx + 1)])
-    # Flatten: each call now returns a list (0–2 entries, one per live scheme)
-    active = sorted(
-        [entry for sublist in raw_lists for entry in sublist],
-        key=lambda x: (x["domain"], x["scheme"])
-    )
-    # domainSchemes: domain → primary scheme (https preferred)
-    state["domainSchemes"] = {
-        r["domain"]: r["scheme"]
-        for r in reversed(active)   # http first so https overwrites
-    }
-    # activeDomains: unique domain names for display
-    state["activeDomains"] = sorted({r["domain"] for r in active})
+    raw = await asyncio.gather(*[_check_domain(fl, sem) for fl in range(mn, mx + 1)])
+    active = sorted([r for r in raw if r], key=lambda x: x["domain"])
+    state["domainSchemes"] = {r["domain"]: r["scheme"] for r in active}
+    state["activeDomains"] = [r["domain"] for r in active]
     slog(f"Found {len(active)} active domain(s): {', '.join(r['domain'] for r in active)}")
     _broadcast({"type": "state", "data": state})
     if not active:
@@ -618,57 +706,22 @@ async def _phase_domains() -> list[dict]:
 
 async def _phase_discover(domains: list[dict]) -> None:
     state["phase"] = "discovering"
-    sem        = asyncio.Semaphore(int(config.get("stream_concurrency", 10)))
-    seen_urls: set[str] = set()   # global dedup across domains
-    dead_urls: list[dict] = []    # playlist entries whose URLs are broken/dead
 
-    # ── Step A: health-check the imported MOJ playlist against known-good domains ──
-    if config.get("slug_source", "both") in ("playlist", "both"):
-        slog("━━━ Checking imported MOJ playlist ━━━")
-        playlist_channels = await _load_playlist_channels()
-        if playlist_channels:
-            active_domains = {d["domain"] for d in domains}
-            # Seed total so progress bar is meaningful during import
-            state["total"] += len(playlist_channels)
-            _broadcast({"type": "state", "data": state})
+    # Build fallback slug list (used only if all auto-discovery stages fail)
+    slog("━━━ Preparing fallback slug list ━━━")
+    fallback_slugs = await _build_fallback_slugs()
+    slog(f"  Fallback: {len(fallback_slugs)} slug(s) ready")
 
-            async def _check_playlist_entry(ch: dict) -> None:
-                url  = ch.get("url")
-                name = ch.get("name") or (url.rsplit("/", 2)[-2].replace("_", " ").title() if url else "Unknown")
-                if not url:
-                    dead_urls.append(ch)
-                    state["progress"] += 1
-                    return
-                alive = await _verify_stream(url, sem)
-                if alive:
-                    if url not in seen_urls:
-                        seen_urls.add(url)
-                        state["results"][url] = {
-                            "url":    url,
-                            "name":   name,
-                            "domain": _domain_from_url(url),
-                            "method": "imported",
-                        }
-                        state["stats"]["streams_verified"] += 1
-                        state["stats"]["streams_found"]    += 1
-                else:
-                    dead_urls.append(ch)
-                state["progress"] += 1
-
-            await asyncio.gather(*[_check_playlist_entry(ch) for ch in playlist_channels])
-            slog(
-                f"  Playlist: {len(seen_urls)} alive (kept), "
-                f"{len(dead_urls)} dead → queued for re-scan"
-            )
-            _broadcast({"type": "state", "data": state})
-
+    sem   = asyncio.Semaphore(int(config.get("stream_concurrency", 10)))
+    seen_slugs: set[str] = set()   # global dedup across domains
 
     for domain_info in domains:
         domain   = domain_info["domain"]
         scheme   = domain_info["scheme"]
+        base_url = f"{scheme}://{domain}"
 
         slog(f"━━━ Discovering {domain} ━━━")
-        streams, method = await _discover_domain(domain, scheme, sem)
+        streams, method = await _discover_domain(domain, scheme, fallback_slugs, sem)
 
         if not streams:
             slog(f"  [{domain}] Nothing found.")
@@ -678,26 +731,26 @@ async def _phase_discover(domains: list[dict]) -> None:
         state["stats"]["discovery_method"][domain] = method
 
         # Deduplicate: skip slugs already resolved by a previous domain
-        new_streams = [s for s in streams if s["url"] not in seen_urls]
+        new_streams = [s for s in streams if s["slug"] not in seen_slugs]
         skipped     = len(streams) - len(new_streams)
         if skipped:
-            slog(f"  [{domain}] Skipping {skipped} stream(s) already found on earlier domain.")
+            slog(f"  [{domain}] Skipping {skipped} slug(s) already found on earlier domain.")
 
         if not new_streams:
             continue
 
         state["total"] += len(new_streams)
         slog(f"  [{domain}] Verifying {len(new_streams)} stream(s) via ffprobe …")
-        verified = await _verify_all(new_streams, sem)
+        verified = await _verify_all(new_streams, method, sem)
 
         for entry in verified:
-            url = entry["url"]
-            if url in seen_urls:
+            slug = entry["slug"]
+            if slug in seen_slugs:
                 continue
-            seen_urls.add(url)
-            state["results"][url] = {
-                "url":    url,
-                "name":   entry.get("name", url.rsplit("/", 2)[-2].replace("_", " ").title()),
+            seen_slugs.add(slug)
+            state["results"][slug] = {
+                "url":    entry["url"],
+                "name":   entry.get("name", slug.replace("_", " ").title()),
                 "domain": domain,
                 "method": method,
             }
@@ -705,13 +758,13 @@ async def _phase_discover(domains: list[dict]) -> None:
             state["progress"]                  += 1
 
         # Mark failed (discovered but not verified)
-        failed_entries = [s for s in new_streams if s["url"] not in seen_urls]
+        failed_entries = [s for s in new_streams if s["slug"] not in seen_slugs]
         for entry in failed_entries:
-            url = entry["url"]
-            seen_urls.add(url)
-            state["results"][url] = {
+            slug = entry["slug"]
+            seen_slugs.add(slug)
+            state["results"][slug] = {
                 "url":    None,
-                "name":   entry.get("name", url.rsplit("/", 2)[-2].replace("_", " ").title()),
+                "name":   entry.get("name", slug.replace("_", " ").title()),
                 "domain": domain,
                 "method": method,
             }
@@ -732,7 +785,7 @@ async def _phase_write() -> None:
     for slug, info in sorted(state["results"].items()):
         if not info.get("url"):
             continue
-        name   = _strip_moj(info.get("name") or slug.replace("_", " ").title())
+        name   = info.get("name") or slug.replace("_", " ").title()
         extinf = (
             f'#EXTINF:-1 tvg-id="{slug}" tvg-name="{name}" '
             f'group-title="MOJ",{name}'
@@ -853,19 +906,11 @@ async def api_post_channels(request: Request):
     return {"status": "ok", "count": len(lines)}
 
 @app.post("/api/run")
-@app.post("/api/scan/start")
 async def api_run():
     if state["running"]:
         raise HTTPException(409, "A scan cycle is already running.")
     asyncio.create_task(run_cycle())
     return {"status": "started"}
-
-@app.post("/api/scan/stop")
-async def api_scan_stop():
-    state["running"] = False
-    state["phase"]   = "idle"
-    _broadcast({"type": "state", "data": state})
-    return {"status": "stopped"}
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):

@@ -1,35 +1,46 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-#  MOJFixxer — Docker Compose
+#  MOJ Playlist Manager — TrueNAS Electric Eel Compatible Compose
 #
-#  Pre-built image from GHCR:
-#    image: ghcr.io/n3o2345/mojfixxer:latest
+#  1. Place this file AND the Dockerfile in the same directory on your NAS:
+#       /mnt/System/APP_Configs/IPTV_Playlists/moveonjoy/
 #
-#  OR build locally (recommended for TrueNAS — avoids GHCR pull):
-#    image: mojfixxer:local
-#    build: .
+#  2. In TrueNAS UI → Apps → Custom App → Install via YAML, paste ONLY:
+#       include:
+#         - /mnt/System/APP_Configs/IPTV_Playlists/moveonjoy/docker-compose.yml
 #
-#  Dashboard : http://<host-ip>:9001/
-#  Playlist  : http://<host-ip>:9001/playlist
+#  Dashboard : http://192.168.1.240:9001/
+#  Playlist  : http://192.168.1.240:9001/playlist
 # ═══════════════════════════════════════════════════════════════════════════════
 
 services:
-  mojfixxer:
-    container_name: mojfixxer
-    build: .
-    # Swap the above two lines to pull from GHCR instead:
-    # image: ghcr.io/n3o2345/mojfixxer:latest
+  moveonjoy-updater:
+    container_name: iptv-moveonjoy
+
+    # Build from the Dockerfile sitting in the same directory as this file.
+    # All source (server.py, index.html) is base64-embedded in the Dockerfile —
+    # no other source files are needed alongside it.
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # Tag the locally built image
+    image: moj-playlist:latest
+
+    # Never attempt to pull from Docker Hub — always use the local build
+    pull_policy: never
 
     environment:
       PYTHONUNBUFFERED: "1"
-      TZ: ${TZ:-America/Chicago}
+      TZ: America/Chicago
 
     ports:
-      - "${HOST_PORT:-9001}:8080"
+      - "192.168.1.240:9001:8080"
 
     volumes:
-      # TrueNAS Scale: use a host path so data survives app removal.
-      # Change /mnt/pool/mojfixxer/data to your actual dataset path.
-      - ${DATA_PATH:-./data-volume}:/app
+      # Mount only the data directory so the volume doesn't shadow
+      # server.py and web/ that are baked into the image.
+      # config.json, input/output playlists, and logs persist here.
+      - /mnt/System/APP_Configs/IPTV_Playlists/moveonjoy/data:/app
 
     restart: unless-stopped
 

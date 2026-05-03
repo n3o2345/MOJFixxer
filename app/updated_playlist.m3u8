@@ -1,0 +1,129 @@
+#EXTM3U
+#EXTINF:-1 tvg-id="I329.63236.zap2it.com" tvg-name="BET" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/b/bd/BET-2021Logo.svg",BET
+http://fl51.moveonjoy.com/BET/index.m3u8
+#EXTINF:-1 tvg-id="I330.14897.zap2it.com" tvg-name="BET Her" tvg-logo="https://upload.wikimedia.org/wikipedia/en/b/ba/BET_Her_2021.png",BET Her
+http://fl12.moveonjoy.com/BET_HER/index.m3u8
+#EXTINF:-1 tvg-id="I302.30420.zap2it.com" tvg-name="Nicktoons" tvg-logo="https://static.wikia.nocookie.net/nickelodeon/images/8/8d/Nicktoons_US_2023.png/revision/latest/scale-to-width-down/1200?cb=20231203212939" group-title="Live Channels",NickToons
+http://fl51.moveonjoy.com/NICKTOONS/index.m3u8
+#EXTINF:-1 tvg-id="I290.59684.zap2it.com" tvg-name="Disney Channel" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/d/d2/2019_Disney_Channel_logo.svg",Disney Channel
+http://fl12.moveonjoy.com/DISNEY/index.m3u8
+#EXTINF:-1 tvg-id="I237.58625.zap2it.com" tvg-name="Bravo" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/6/64/Bravo_2017_logo.svg/1200px-Bravo_2017_logo.svg.png",Bravo
+http://fl12.moveonjoy.com/BRAVO/index.m3u8
+#EXTINF:-1 tvg-id="I311.10093.zap2it.com" tvg-name="Freeform" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/a/a3/Freeform_2022.svg/2560px-Freeform_2022.svg.png" group-title="Live Channels",Freeform
+http://fl51.moveonjoy.com/FREEFORM/index.m3u8
+#EXTINF:-1 tvg-id="I248.58574.zap2it.com" tvg-name="FX" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/4/4d/FX_International_logo.svg" group-title="Live Channels",FX
+http://fl12.moveonjoy.com/FX/index.m3u8
+#EXTINF:-1 tvg-id="I258.70253.zap2it.com" tvg-name="FX Movie" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/c/cb/FX_Movies_logo.svg/1280px-FX_Movies_logo.svg.png" group-title="Live Channels",FXM
+http://fl12.moveonjoy.com/FXM/index.m3u8
+#EXTINF:-1 tvg-id="I259.66379.zap2it.com" tvg-name="FXX" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/FXX_Logo.svg/1200px-FXX_Logo.svg.png" group-title="Live Channels",FXX
+http://fl12.moveonjoy.com/FXX/index.m3u8
+#EXTINF:-1 tvg-id="I82.73067.zap2it.com" tvg-name="Bounce" tvg-logo="https://storage.googleapis.com/btvwp-uploads/2018/02/5bfb1301-bounce_adjusted1.png",Bounce
+http://fl51.moveonjoy.com/BOUNCE_TV/index.m3u8
+#EXTINF:-1 tvg-id="I305.76894.zap2it.com" tvg-name="ION" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/2/28/Ion_logo.svg" group-title="Live Channels",ION
+http://fl12.moveonjoy.com/ION_TV/index.m3u8
+#EXTINF:-1 tvg-id="I77.70436.zap2it.com" tvg-name="MeTV" tvg-logo="https://www.metv.com/images/metv_logo.png" group-title="Live Channels",MeTV
+http://fl12.moveonjoy.com/ME_TV/index.m3u8
+#EXTINF:-1 tvg-id="I279.70388.zap2it.com" tvg-name="OWN" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/a/a1/OWN_Canada_2015_logo.png" group-title="Live Channels",OWN
+http://fl12.moveonjoy.com/OWN/index.m3u8
+#EXTINF:-1 tvg-id="I238.68385.zap2it.com" tvg-name="ReelzChannel" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Reelz_Channel.svg/795px-Reelz_Channel.svg.png" group-title="Live Channels",ReelzChannel
+http://fl51.moveonjoy.com/REELZ/index.m3u8
+#EXTINF:-1 tvg-id="I247.58515.zap2it.com" tvg-name="TBS" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/2/2c/TBS_2020.svg" group-title="Live Channels",TBS
+http://fl51.moveonjoy.com/TBS/index.m3u8
+#EXTINF:-1 tvg-id="I280.57391.zap2it.com" tvg-name="TLC" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/TLC_Logo.svg/1200px-TLC_Logo.svg.png" group-title="Live Channels",TLC
+http://fl12.moveonjoy.com/TLC/index.m3u8
+#EXTINF:-1 tvg-id="I260.59296.zap2it.com" tvg-name="WeTV" tvg-logo="https://static.wikia.nocookie.net/logopedia/images/5/5e/WE_tvred.svg/revision/latest?cb=20210606211640" group-title="Live Channels",WeTV
+http://fl12.moveonjoy.com/WE_TV/index.m3u8
+#EXTINF:-1 tvg-id="I331.60964.zap2it.com" tvg-name="MTV" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/MTV_2021_%28brand_version%29.svg/1200px-MTV_2021_%28brand_version%29.svg.png" group-title="Live Channels",MTV
+http://fl12.moveonjoy.com/MTV/index.m3u8
+#EXTINF:-1 tvg-id="I335.60046.zap2it.com" tvg-name="VH1" tvg-logo="https://wikiwandv2-19431.kxcdn.com/_next/image?url=https://upload.wikimedia.org/wikipedia/commons/thumb/9/94/VH1_logonew.svg/640px-VH1_logonew.svg.png&w=640&q=50" group-title="Live Channels",VH1
+http://fl12.moveonjoy.com/VH1/index.m3u8
+#EXTINF:-1 tvg-id="I525.12719.zap2it.com" tvg-name="STARZ" tvg-logo="https://www.starz.com/assets/images/icons/starz-logo-glint.svg" group-title="Live Channels",STARZ
+http://fl51.moveonjoy.com/STARZ/index.m3u8
+#EXTINF:-1 tvg-id="I528.57569.zap2it.com" tvg-name="Starz Comedy" tvg-logo="https://iili.io/bIfMDg.md.png" group-title="Live Channels",Starz Comedy
+http://fl51.moveonjoy.com/STARZ_COMEDY/index.m3u8
+#EXTINF:-1 tvg-id="I529.16311.zap2it.com" tvg-name="Starz Edge" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/3/3f/Starz_Edge_Logo_2022.svg" group-title="Live Channels",Starz Edge
+http://fl51.moveonjoy.com/STARZ_EDGE/index.m3u8
+#EXTINF:-1 tvg-id="I535.10178.zap2it.com" tvg-name="Starz Encore East" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/3/38/Starz_Encore_Logo_2022.svg/2560px-Starz_Encore_Logo_2022.svg.png" group-title="Live Channels",Starz Encore East
+http://fl51.moveonjoy.com/STARZ_ENCORE/index.m3u8
+#EXTINF:-1 tvg-id="I541.14871.zap2it.com" tvg-name="Starz Encore Action" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/9/93/Starz_Encore_Action_Logo_2022.svg/2560px-Starz_Encore_Action_Logo_2022.svg.png" group-title="Live Channels",Starz Encore Action
+http://fl51.moveonjoy.com/STARZ_ENCORE_ACTION/index.m3u8
+#EXTINF:-1 tvg-id="Stadium.us" tvg-name="Stadium" tvg-logo="https://seeklogo.com/images/S/stadium-logo-E51B33CA35-seeklogo.com.png" group-title="Live Channels",Stadium
+http://fl51.moveonjoy.com/STADIUM/index.m3u8
+#EXTINF:-1 tvg-id="I281.31046.zap2it.com" tvg-name="MotorTrend" tvg-logo="https://static.wikia.nocookie.net/logopedia/images/5/5a/Motor_Trend.svg/revision/latest?cb=20180410190357" group-title="Live Channels",MotorTrend
+http://fl51.moveonjoy.com/MOTORTREND/index.m3u8
+#EXTINF:-1 tvg-id="I216.45526.zap2it.com" tvg-name="NBA Network" tvg-logo="https://upload.wikimedia.org/wikipedia/en/thumb/d/d2/NBA_TV.svg/1200px-NBA_TV.svg.png" group-title="Live Channels",NBA TV
+http://fl51.moveonjoy.com/NBA_TV/index.m3u8
+#EXTINF:-1 tvg-id="I611.89714.zap2it.com" tvg-name="SEC Network" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/b/b9/SEC_Network_logo.svg/1200px-SEC_Network_logo.svg.png" group-title="Live Channels",SEC Network
+http://fl51.moveonjoy.com/SEC_NETWORK/index.m3u8
+#EXTINF:-1 tvg-name="BET Her East" group-title="Discovered Channels",BET Her East
+http://fl12.moveonjoy.com/BET_HER/index.m3u8
+#EXTINF:-1 tvg-name="Discovery" group-title="Discovered Channels",Discovery
+http://fl12.moveonjoy.com/DISCOVERY/index.m3u8
+#EXTINF:-1 tvg-name="FOX News Channel" group-title="Discovered Channels",FOX News Channel
+http://fl12.moveonjoy.com/FOX_NEWS/index.m3u8
+#EXTINF:-1 tvg-name="FX East" group-title="Discovered Channels",FX East
+http://fl12.moveonjoy.com/FX/index.m3u8
+#EXTINF:-1 tvg-name="FXX East" group-title="Discovered Channels",FXX East
+http://fl12.moveonjoy.com/FXX/index.m3u8
+#EXTINF:-1 tvg-name="TBS East" group-title="Discovered Channels",TBS East
+http://fl51.moveonjoy.com/TBS/index.m3u8
+#EXTINF:-1 tvg-name="VH1 East" group-title="Discovered Channels",VH1 East
+http://fl12.moveonjoy.com/VH1/index.m3u8
+#EXTINF:-1 tvg-name="ABC East" group-title="Discovered Channels",ABC East
+http://fl51.moveonjoy.com/ABC/index.m3u8
+#EXTINF:-1 tvg-name="BET Gospel" group-title="Discovered Channels",BET Gospel
+http://fl51.moveonjoy.com/BET_GOSPEL/index.m3u8
+#EXTINF:-1 tvg-name="CBS (WBZ)" group-title="Discovered Channels",CBS (WBZ)
+http://fl51.moveonjoy.com/CBS/index.m3u8
+#EXTINF:-1 tvg-name="Freeform East" group-title="Discovered Channels",Freeform East
+http://fl51.moveonjoy.com/FREEFORM/index.m3u8
+#EXTINF:-1 tvg-name="NickToons East" group-title="Discovered Channels",NickToons East
+http://fl51.moveonjoy.com/NICKTOONS/index.m3u8
+#EXTINF:-1 tvg-name="Starz Comedy East" group-title="Discovered Channels",Starz Comedy East
+http://fl51.moveonjoy.com/STARZ_COMEDY/index.m3u8
+#EXTINF:-1 tvg-name="Starz Edge East" group-title="Discovered Channels",Starz Edge East
+http://fl51.moveonjoy.com/STARZ_EDGE/index.m3u8
+#EXTINF:-1 tvg-name="TBS East" group-title="Discovered Channels",TBS East
+http://fl51.moveonjoy.com/TBS/index.m3u8
+#EXTINF:-1 tvg-name="Tennis" group-title="Discovered Channels",Tennis
+http://fl51.moveonjoy.com/TENNIS/index.m3u8
+#EXTINF:-1 tvg-name="Cozi" group-title="Discovered Channels",Cozi
+http://fl51.moveonjoy.com/COZI/index.m3u8
+#EXTINF:-1 tvg-name="Disney" group-title="Discovered Channels",Disney
+http://fl12.moveonjoy.com/DISNEY/index.m3u8
+#EXTINF:-1 tvg-name="Reelz" group-title="Discovered Channels",Reelz
+http://fl51.moveonjoy.com/REELZ/index.m3u8
+#EXTINF:-1 tvg-name="BET_HER" group-title="Discovered Channels",BET_HER
+http://fl12.moveonjoy.com/BET_HER/index.m3u8
+#EXTINF:-1 tvg-name="DISNEY_CHANNEL" group-title="Discovered Channels",DISNEY_CHANNEL
+http://fl12.moveonjoy.com/DISNEY/index.m3u8
+#EXTINF:-1 tvg-name="INSP" group-title="Discovered Channels",INSP
+http://fl12.moveonjoy.com/INSP/index.m3u8
+#EXTINF:-1 tvg-name="TV_LAND" group-title="Discovered Channels",TV_LAND
+http://fl12.moveonjoy.com/TV_LAND/index.m3u8
+#EXTINF:-1 tvg-name="CBS_SPORTS_NETWORK" group-title="Discovered Channels",CBS_SPORTS_NETWORK
+http://fl51.moveonjoy.com/CBS/index.m3u8
+#EXTINF:-1 tvg-name="HISTORY" group-title="Discovered Channels",HISTORY
+http://fl51.moveonjoy.com/HISTORY/index.m3u8
+#EXTINF:-1 tvg-name="NBA_TV" group-title="Discovered Channels",NBA_TV
+http://fl51.moveonjoy.com/NBA_TV/index.m3u8
+#EXTINF:-1 tvg-name="QVC" group-title="Discovered Channels",QVC
+http://fl51.moveonjoy.com/QVC/index.m3u8
+#EXTINF:-1 tvg-name="SEC_NETWORK" group-title="Discovered Channels",SEC_NETWORK
+http://fl51.moveonjoy.com/SEC_NETWORK/index.m3u8
+#EXTINF:-1 tvg-name="SPORTSMAN_CHANNEL" group-title="Discovered Channels",SPORTSMAN_CHANNEL
+http://fl51.moveonjoy.com/SPORTSMAN_CHANNEL/index.m3u8
+#EXTINF:-1 tvg-name="STARZ_COMEDY" group-title="Discovered Channels",STARZ_COMEDY
+http://fl51.moveonjoy.com/STARZ_COMEDY/index.m3u8
+#EXTINF:-1 tvg-name="STARZ_EDGE" group-title="Discovered Channels",STARZ_EDGE
+http://fl51.moveonjoy.com/STARZ_EDGE/index.m3u8
+#EXTINF:-1 tvg-name="STARZ_ENCORE" group-title="Discovered Channels",STARZ_ENCORE
+http://fl51.moveonjoy.com/STARZ_ENCORE/index.m3u8
+#EXTINF:-1 tvg-name="STARZ_ENCORE_ACTION" group-title="Discovered Channels",STARZ_ENCORE_ACTION
+http://fl51.moveonjoy.com/STARZ_ENCORE_ACTION/index.m3u8
+#EXTINF:-1 tvg-name="STARZ_ENCORE_CLASSIC" group-title="Discovered Channels",STARZ_ENCORE_CLASSIC
+http://fl51.moveonjoy.com/STARZ_ENCORE_CLASSIC/index.m3u8
+#EXTINF:-1 tvg-name="TENNIS_CHANNEL" group-title="Discovered Channels",TENNIS_CHANNEL
+http://fl51.moveonjoy.com/TENNIS/index.m3u8
+#EXTINF:-1 tvg-name="CBS" group-title="Discovered Channels",CBS
+http://fl51.moveonjoy.com/CBS/index.m3u8
