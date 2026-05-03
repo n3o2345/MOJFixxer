@@ -275,65 +275,6 @@ def normalize_slug(raw: str) -> str:
     s = re.sub(r"_+", "_", s)
     return s.strip("_")
 
-def _expand_slugs(slugs: list[str]) -> list[str]:
-    """
-    Expand a base slug list into variants that cover numbered/suffixed channels.
-
-    "ESPN"  →  ESPN, ESPN2, ESPN_2, ESPN3, ESPN_3, … ESPN9, ESPN_9,
-               ESPNU, ESPN_U, ESPNNEWS, ESPN_NEWS, ESPNCLASSIC, ESPN_CLASSIC
-    "STARZ" →  STARZ, STARZ2 … STARZ9, STARZEAST, STARZ_EAST,
-               STARZMOVIES, STARZ_MOVIES, STARZCOMEDY, STARZ_COMEDY,
-               STARZEDGE, STARZ_EDGE, STARZKIDS, STARZ_KIDS
-    "HBO"   →  HBO, HBO2 … HBO9, HBOEAST, HBO_EAST, HBOWEST, HBO_WEST,
-               HBOFAMILY, HBO_FAMILY, HBOSIGNATURE, HBO_SIGNATURE,
-               HBOZONE, HBO_ZONE, HBOLATINO, HBO_LATINO
-
-    Numbers 2-9 and a curated set of common suffixes are tried for every slug.
-    Existing slugs that already have a numeric/suffix tail are kept as-is and
-    are NOT expanded further (avoids STARZ2 → STARZ22 etc.).
-    """
-    COMMON_SUFFIXES = [
-        # Geographic / schedule
-        "EAST", "WEST", "HD",
-        # Genre / brand
-        "MOVIES", "COMEDY", "DRAMA", "ACTION", "KIDS", "FAMILY",
-        "CLASSIC", "SIGNATURE", "EDGE", "ZONE", "LATINO", "NEWS",
-        # Letter suffixes (ESPN U, etc.)
-        "U",
-    ]
-
-    # Patterns that indicate a slug is already a variant — don't expand these
-    import re as _re
-    _already_variant = _re.compile(
-        r'(?:' +
-        '|'.join(_re.escape(s) for s in COMMON_SUFFIXES) +
-        r'|\d)$'
-    )
-
-    seen:    set[str]  = set()
-    result:  list[str] = []
-
-    def _add(s: str) -> None:
-        if s and s not in seen:
-            seen.add(s)
-            result.append(s)
-
-    for slug in slugs:
-        _add(slug)
-        # Don't fan out from slugs that are already variants
-        if _already_variant.search(slug):
-            continue
-        # Numeric variants 2-9
-        for n in range(2, 10):
-            _add(f"{slug}{n}")
-            _add(f"{slug}_{n}")
-        # Word suffix variants
-        for suffix in COMMON_SUFFIXES:
-            _add(f"{slug}{suffix}")
-            _add(f"{slug}_{suffix}")
-
-    return result
-
 
 # ── Parsers ────────────────────────────────────────────────────────────────────
 def _is_m3u(text: str) -> bool:
@@ -556,67 +497,6 @@ async def _load_playlist_channels() -> list[dict]:
     return channels
 
 
-async def _build_fallback_slugs(
-    extra_slugs: list[str] | None = None,
-) -> list[str]:
-    source = config.get("slug_source", "both")
-    seen:  set[str]  = set()
-    slugs: list[str] = []
-
-    def _add(new: list[str], label: str) -> None:
-        added = sum(1 for s in new if s and s not in seen and not seen.add(s) and slugs.append(s) is None)  # noqa
-        slog(f"  {label}: +{added} slug(s)  (total {len(slugs)})")
-
-    # Dead playlist slugs go first — most likely to be healable via brute-force
-    if extra_slugs:
-        _add(extra_slugs, "dead playlist slugs")
-
-    if source in ("channels", "both"):
-        _add(_slugs_from_txt(CHANNELS_FILE), "channels.txt")
-
-    if source in ("playlist", "both"):
-        url = config.get("playlist_url", "").strip()
-        if url:
-            rc, body = await _run(
-                "curl", "-L", "-k", "-s", "-f", "-A", _UA,
-                "--max-time", "30", url,
-                timeout=35, capture_stdout=True,
-            )
-            if rc == 0 and body:
-                _add(_slugs_from_m3u_text(body), "remote playlist")
-            else:
-                slog(f"  Remote playlist fetch failed (exit {rc})", "warning")
-
-    expanded = _expand_slugs(slugs)
-    slog(f"  Slug expansion: {len(slugs)} base → {len(expanded)} total")
-    return expanded
-
-async def _brute_force_domain(
-    base_url: str,
-    slugs: list[str],
-    sem: asyncio.Semaphore,
-) -> list[dict]:
-    """Try each (expanded) slug × pattern, return found streams."""
-    patterns = config.get("path_patterns", DEFAULT_CONFIG["path_patterns"])
-    found    = []
-
-    async def _try_slug(slug: str) -> dict | None:
-        for pattern in patterns:
-            url = base_url.rstrip("/") + pattern.replace("{slug}", slug)
-            ok  = await _verify_stream(url, sem)
-            if ok:
-                return {
-                    "slug":   slug,
-                    "name":   slug.replace("_", " ").title(),
-                    "url":    url,
-                    "method": "brute",
-                }
-        return None
-
-    tasks   = [_try_slug(s) for s in slugs]
-    results = await asyncio.gather(*tasks)
-    found   = [r for r in results if r]
-    return found
 
 # ── m3u8 Scraper ─────────────────────────────────────────────────────────────────
 # Match anything containing .m3u8 — absolute or relative, any path structure.
@@ -679,32 +559,18 @@ async def _discover_playlist(base_url: str) -> list[dict]:
 async def _discover_domain(
     domain: str,
     scheme: str,
-    fallback_slugs: list[str],
     sem: asyncio.Semaphore,
 ) -> tuple[list[dict], str]:
     """
-    Run the full discovery pipeline for one domain.
-    Returns (stream_list, method_used).
-    Always tries https first then http — HTTPS streams are never missed.
+    Fetch the server root on https then http, scrape every */index.m3u8 found.
+    That's it — no brute-force, no slug guessing.
     """
-    # Always try https first, then http.
     for s in ("https", "http"):
         base_url = f"{s}://{domain}"
-
-        # Wildcard M3U scan — grab whatever the server exposes
-        streams = await _discover_playlist(base_url)
+        streams  = await _discover_playlist(base_url)
         if streams:
-            slog(f"  [{domain}] Wildcard scan ({s}) → {len(streams)} stream(s)")
+            slog(f"  [{domain}] Found {len(streams)} stream(s) via {s}")
             return streams, "playlist"
-
-    # Stage 5 — Brute-force fallback (uses preferred scheme)
-    base_url = f"{scheme}://{domain}"
-    if fallback_slugs:
-        slog(f"  [{domain}] Brute-force {len(fallback_slugs)} slug(s) …")
-        streams = await _brute_force_domain(base_url, fallback_slugs, sem)
-        if streams:
-            slog(f"  [{domain}] Brute-force → {len(streams)} hit(s)")
-        return streams, "brute"
 
     return [], "none"
 
@@ -796,18 +662,13 @@ async def _phase_discover(domains: list[dict]) -> None:
             )
             _broadcast({"type": "state", "data": state})
 
-    # ── Step B: build fallback slug list (channels.txt only — discovery handles the rest) ──
-    slog("━━━ Preparing fallback slug list ━━━")
-    fallback_slugs = await _build_fallback_slugs(extra_slugs=None)
-    slog(f"  Fallback: {len(fallback_slugs)} slug(s) ready")
 
     for domain_info in domains:
         domain   = domain_info["domain"]
         scheme   = domain_info["scheme"]
-        base_url = f"{scheme}://{domain}"
 
         slog(f"━━━ Discovering {domain} ━━━")
-        streams, method = await _discover_domain(domain, scheme, fallback_slugs, sem)
+        streams, method = await _discover_domain(domain, scheme, sem)
 
         if not streams:
             slog(f"  [{domain}] Nothing found.")
