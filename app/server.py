@@ -185,6 +185,139 @@ _FALLBACK_PATHS = [
     "/get.php",
 ]
 
+# ── MOJ Channel Slugs ─────────────────────────────────────────────────────────
+# Each entry is a slug prefix; any channel whose URL path segment *starts with*
+# this slug (case-insensitive) is considered a MOJ channel family match.
+# e.g. "espn" matches espn, espn2, espnu, espnews, espn-classic, etc.
+MOJ_CHANNEL_SLUGS: list[str] = [
+    # ── Broadcast networks ────────────────────────────────────────────────────
+    "abc", "cbs", "nbc", "fox", "pbs", "cw",
+
+    # ── ESPN family — "espn" prefix catches espn, espn2, espnu, espnews, etc.
+    "espn", "espnews", "fs1", "fs2",
+    "fox_sport", "foxsport",            # FS1/FS2 alternate slugs
+
+    # ── Sports leagues / dedicated channels ───────────────────────────────────
+    "nfl", "nba", "mlb", "nhl",
+    "golf", "tennis",
+    "big_ten", "bigten", "big10",
+    "sec", "acc",
+    "olympic",
+    "stadium", "comet",
+    "sportsman", "outdoor", "motorsport", "motortrend",
+    "pursuit",
+
+    # ── News / info ───────────────────────────────────────────────────────────
+    "hln", "turbo", "discovery_turbo",
+
+    # ── Discovery family ──────────────────────────────────────────────────────
+    "discovery", "animal_planet", "animalplanet", "apl",
+    "science", "investigation_discovery", "investigationdiscovery",
+    "tlc", "id",
+
+    # ── Home / lifestyle ──────────────────────────────────────────────────────
+    "hgtv", "food_network", "foodnetwork",
+    "cooking", "travel", "diy", "magnolia",
+
+    # ── History / docs ────────────────────────────────────────────────────────
+    "history", "military_history", "militaryhistory",
+    "american_heroes", "americanheroes",
+    "smithsonian",
+
+    # ── Women / lifestyle ─────────────────────────────────────────────────────
+    "bravo", "oxygen", "lifetime", "we_tv", "wetv",
+    "freeform", "hallmark", "own",
+
+    # ── Entertainment / drama ─────────────────────────────────────────────────
+    "amc", "ifc", "sundance", "tcm",
+    "fx", "fxx", "fxm",
+    "e!", "e_",                         # E! slugs may appear as "e!" or "e_"
+
+    # ── Premium / pay ─────────────────────────────────────────────────────────
+    "starz", "showtime", "cinemax", "epix", "mgm", "hbo",
+
+    # ── BET family ────────────────────────────────────────────────────────────
+    "bet", "tv_one", "tvone", "fuse", "logo",
+
+    # ── Comedy / general entertainment ───────────────────────────────────────
+    "comedy", "trutv", "tbs", "tnt",
+    "cartoon", "boomerang",
+
+    # ── Kids ─────────────────────────────────────────────────────────────────
+    "nick", "disney", "toon",
+
+    # ── Music ─────────────────────────────────────────────────────────────────
+    "mtv", "vh1", "cmt",
+
+    # ── Sci-fi / genre ────────────────────────────────────────────────────────
+    "syfy", "bbc_america", "bbcamerica",
+    "ae", "a_e", "aande", "vice", "reelz", "pop",
+    "paramount",
+
+    # ── Free OTA / antenna nets ───────────────────────────────────────────────
+    "bounce", "metv", "me_tv",
+    "cozi", "antenna", "ion",
+    "laff", "gettv", "get_tv",
+    "charge", "grit", "defy", "insp",
+    "tv_land", "tvland",
+    "mavtv", "mav", "buzzr", "cleo",
+    "court", "curiosity", "cowboy",
+    "destination", "nosey", "outside",
+    "start_tv", "starttv",
+    "blossom", "posi",
+    "justice", "heros", "recipe",
+    "the_movie", "themovie",
+    "so_yummy", "soyummy",
+    "shorts", "flix",
+    "usa",
+]
+
+def _normalize(s: str) -> str:
+    """Lowercase and collapse spaces/underscores/hyphens to a single underscore."""
+    return re.sub(r"[\s\-]+", "_", s.strip().lower())
+
+def _is_moj_channel(name: str, url: str) -> bool:
+    """
+    Return True if this channel looks like a MOJ family channel.
+
+    Prefix logic: slug "espn" matches espn, espn2, espnu, espnews, etc.
+    Separators (space / underscore / hyphen) are normalized before comparison
+    so "Fox Sports", "fox_sports", and "fox-sports" all hit prefix "fox_sport".
+    Both the URL path slug and the display name are checked.
+    """
+    path_parts = [p for p in url.split("?")[0].rstrip("/").split("/") if p]
+    raw_slug   = path_parts[-2] if len(path_parts) >= 2 else ""
+    slug       = _normalize(raw_slug)
+    clean_name = _normalize(_strip_tags(name))
+
+    for prefix in MOJ_CHANNEL_SLUGS:
+        p = _normalize(prefix)
+        if slug.startswith(p) or clean_name.startswith(p):
+            return True
+    return False
+
+def _moj_retest_urls(url: str, known_domains: list[str]) -> list[str]:
+    """
+    Given a working MOJ stream URL, generate HTTP+HTTPS variants across
+    all currently-active known-good domains, plus the original URL itself.
+    Path is preserved; only the scheme+host changes.
+    """
+    # Extract path from original URL
+    m = re.match(r"https?://[^/]+(/.+)", url)
+    path = m.group(1) if m else "/"
+
+    variants: list[str] = [url]  # always include original
+    seen_variants: set[str] = set([url])
+
+    for domain in known_domains:
+        for scheme in ("https", "http"):
+            candidate = f"{scheme}://{domain}{path}"
+            if candidate not in seen_variants:
+                seen_variants.add(candidate)
+                variants.append(candidate)
+
+    return variants
+
 # ── Subprocess Runner ──────────────────────────────────────────────────────────
 async def _run(
     *args: str,
@@ -450,10 +583,15 @@ async def _phase_discover(domains: list[DomainEntry]) -> None:
     sem       = asyncio.Semaphore(int(config.get("stream_concurrency", 20)))
     seen_urls: set[str] = set()
 
-    # ── Optional: seed from external playlist ─────────────────────────────────
+    # Collect all active domain hostnames (for MOJ retest rotation)
+    active_domain_hosts: list[str] = list(dict.fromkeys(
+        e["domain"] for e in domains
+    ))
+
+    # ── Phase A: Search external playlist for MOJ channels ────────────────────
     playlist_url = config.get("playlist_url", "").strip()
     if playlist_url:
-        slog("━━━ Seeding from external playlist ━━━")
+        slog("━━━ Searching external playlist for MOJ channels ━━━")
         rc, body = await _run(
             "curl", "-sL", "-k", "-A", _UA,
             "--max-time", "30",
@@ -461,12 +599,35 @@ async def _phase_discover(domains: list[DomainEntry]) -> None:
             timeout=35,
         )
         if rc == 0 and body and _is_m3u(body):
-            entries = [e for e in _parse_m3u(body) if "index.m3u8" in e["url"]]
-            slog(f"  {len(entries)} index.m3u8 URL(s) from external playlist")
-            state["total"] += len(entries)
+            all_entries = _parse_m3u(body)
+            slog(f"  Playlist has {len(all_entries)} total entries")
+
+            # Filter to MOJ channels only (strips (MOJ) tag automatically via _strip_tags)
+            moj_entries = [
+                e for e in all_entries
+                if "index.m3u8" in e["url"] and _is_moj_channel(e["name"], e["url"])
+            ]
+            slog(f"  {len(moj_entries)} MOJ channel(s) matched by slug")
+
+            # For each MOJ channel, build HTTP+HTTPS variants across all active domains
+            # and test each until one succeeds (rotate through known-good domains)
+            moj_candidates: list[dict] = []
+            seen_candidate_urls: set[str] = set()
+            for entry in moj_entries:
+                variants = _moj_retest_urls(entry["url"], active_domain_hosts)
+                for v_url in variants:
+                    if v_url not in seen_candidate_urls:
+                        seen_candidate_urls.add(v_url)
+                        moj_candidates.append({
+                            "url":  v_url,
+                            "name": entry["name"],  # already stripped by _parse_m3u
+                        })
+
+            slog(f"  Testing {len(moj_candidates)} URL variant(s) (HTTP+HTTPS × active domains) …")
+            state["total"] += len(moj_candidates)
             _broadcast({"type": "state", "data": state})
 
-            async def _seed(entry: dict) -> None:
+            async def _seed_moj(entry: dict) -> None:
                 if _stop_event.is_set() or entry["url"] in seen_urls:
                     state["progress"] += 1
                     return
@@ -476,18 +637,49 @@ async def _phase_discover(domains: list[DomainEntry]) -> None:
                            _domain_of(entry["url"]), _scheme_of(entry["url"]))
                     state["stats"]["streams_verified"] += 1
                     state["stats"]["streams_found"]    += 1
+                    slog(f"  ✓ {entry['name']}  [{_scheme_of(entry['url'])}://{_domain_of(entry['url'])}]")
                 else:
                     state["stats"]["streams_failed"] += 1
                 state["progress"] += 1
                 _broadcast({"type": "state", "data": state})
 
-            await asyncio.gather(*[_seed(e) for e in entries])
-            slog(f"  Seeded {state['stats']['streams_verified']} live stream(s)")
+            await asyncio.gather(*[_seed_moj(e) for e in moj_candidates])
+            moj_found = sum(
+                1 for e in moj_candidates if e["url"] in state["results"]
+            )
+            slog(f"  MOJ channel search complete — {moj_found} live stream(s) found")
+
+            # Also seed any non-MOJ index.m3u8 entries from the playlist
+            other_entries = [
+                e for e in all_entries
+                if "index.m3u8" in e["url"] and not _is_moj_channel(e["name"], e["url"])
+            ]
+            if other_entries:
+                slog(f"  Seeding {len(other_entries)} non-MOJ playlist entry/ies …")
+                state["total"] += len(other_entries)
+                _broadcast({"type": "state", "data": state})
+
+                async def _seed_other(entry: dict) -> None:
+                    if _stop_event.is_set() or entry["url"] in seen_urls:
+                        state["progress"] += 1
+                        return
+                    if await _verify(entry["url"], sem):
+                        seen_urls.add(entry["url"])
+                        _store(entry["url"], entry["name"],
+                               _domain_of(entry["url"]), _scheme_of(entry["url"]))
+                        state["stats"]["streams_verified"] += 1
+                        state["stats"]["streams_found"]    += 1
+                    else:
+                        state["stats"]["streams_failed"] += 1
+                    state["progress"] += 1
+                    _broadcast({"type": "state", "data": state})
+
+                await asyncio.gather(*[_seed_other(e) for e in other_entries])
         else:
             slog("  External playlist unavailable or not M3U", "warning")
 
-    # ── Discover per domain+scheme ─────────────────────────────────────────────
-    slog("━━━ Discovering streams ━━━")
+    # ── Phase B: Discover per domain+scheme (domain sweep) ────────────────────
+    slog("━━━ Discovering streams via domain sweep ━━━")
 
     for entry in domains:
         if _stop_event.is_set():
