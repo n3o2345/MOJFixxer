@@ -618,43 +618,39 @@ async def _brute_force_domain(
     found   = [r for r in results if r]
     return found
 
-# ── index.m3u8 Scraper ───────────────────────────────────────────────────────────
-# Exact pattern used by these servers: http://{domain}/{SLUG}/index.m3u8
-# Strategy: fetch the root (or fallback paths), regex out every /SLUG/index.m3u8
-# found anywhere in the response, return them all. One request per domain.
+# ── m3u8 Scraper ─────────────────────────────────────────────────────────────────
+# Match anything containing .m3u8 — absolute or relative, any path structure.
 
-# Match any /{path}/index.m3u8 — captures the full relative path as group 1
-_INDEX_M3U8_RE = re.compile(r'(/[^\s"\'<>]+/index\.m3u8)', re.IGNORECASE)
+_M3U8_ABS_RE = re.compile(r'https?://[^\s"\'<>]*\.m3u8[^\s"\'<>]*', re.IGNORECASE)
+_M3U8_REL_RE = re.compile(r'(/[^\s"\'<>]*\.m3u8[^\s"\'<>]*)',        re.IGNORECASE)
 
 
 async def _discover_playlist(base_url: str) -> list[dict]:
     """
-    Fetch the server root (and fallback paths), scrape every */index.m3u8
-    URL found anywhere in the response body, and return a stream entry for each.
-
-    Pattern: http://{domain}/*/index.m3u8
-    No slug concept — the full URL is all that matters.
+    Fetch the server root (and fallback paths), collect every URL containing
+    .m3u8 found anywhere in the response — absolute or relative, any structure.
+    Returns a stream entry for each unique URL found.
     """
     found:   list[dict] = []
-    seen:    set[str]   = set()   # dedup by full URL
+    seen:    set[str]   = set()
     visited: set[str]   = set()
 
+    def _name(url: str) -> str:
+        # Best-effort display name from the URL path
+        parts = [p for p in url.split("?")[0].rstrip("/").split("/") if p]
+        return parts[-2].replace("_", " ").replace("-", " ").title() if len(parts) >= 2 else parts[-1] if parts else url
+
     def _scrape(body: str) -> None:
-        # Absolute URLs already in body
-        for m in re.finditer(r'https?://[^\s"\'<>]+/index\.m3u8', body):
-            url = m.group(0).strip()
+        for m in _M3U8_ABS_RE.finditer(body):
+            url = m.group(0).strip().rstrip("\"',>")
             if url not in seen:
                 seen.add(url)
-                name = url.rstrip("/").rsplit("/", 2)[-2].replace("_", " ").replace("-", " ").title()
-                found.append({"url": url, "name": name, "method": "index_m3u8"})
-        # Relative paths → make absolute
-        for m in _INDEX_M3U8_RE.finditer(body):
-            rel = m.group(1).strip()
-            url = base_url.rstrip("/") + rel
+                found.append({"url": url, "name": _name(url), "method": "m3u8_scan"})
+        for m in _M3U8_REL_RE.finditer(body):
+            url = (base_url.rstrip("/") + m.group(1)).strip().rstrip("\"',>")
             if url not in seen:
                 seen.add(url)
-                name = rel.rstrip("/").rsplit("/", 2)[-2].replace("_", " ").replace("-", " ").title()
-                found.append({"url": url, "name": name, "method": "index_m3u8"})
+                found.append({"url": url, "name": _name(url), "method": "m3u8_scan"})
 
     for path in ["/"] + _PLAYLIST_PATHS:
         url = base_url.rstrip("/") + path
@@ -668,7 +664,7 @@ async def _discover_playlist(base_url: str) -> list[dict]:
 
         _scrape(body)
 
-        # Also parse if body is a proper M3U
+        # Also parse if body is a proper M3U (catches #EXTINF entries)
         if _is_m3u(body):
             for s in parse_m3u_content(body, base_url):
                 if s["url"] not in seen:
