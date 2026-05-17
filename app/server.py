@@ -386,6 +386,8 @@ async def _verify(url: str, sem: asyncio.Semaphore) -> bool:
             "-analyzeduration", "2000000",
             "-user_agent",      _UA,
             "-allowed_extensions", "ALL",
+            "-protocol_whitelist", "crypto,data,file,http,https,tcp,tls",
+            "-tls_verify",         "0",
             "-i",               url,
             timeout=t + 5,
             capture_stdout=False,
